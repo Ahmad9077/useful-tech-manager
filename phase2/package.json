@@ -10,6 +10,7 @@
     "backup": "node bin/backup.mjs",
     "content-test": "node bin/run-content-test.mjs",
     "analytics": "node bin/collect-analytics.mjs",
+    "semantic-live-test": "node bin/semantic-live-test.mjs",
     "check": "node --check src/*.mjs && node --check bin/*.mjs"
   },
   "dependencies": {

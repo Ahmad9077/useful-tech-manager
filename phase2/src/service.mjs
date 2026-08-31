@@ -62,7 +62,7 @@ export class Phase2Service {
     const max = this.store.db.prepare('SELECT max(update_id) AS value FROM telegram_updates').get().value; const updates = await this.telegram.getUpdates(max === null ? undefined : Number(max) + 1);
     for (const update of updates) {
       try {
-        const result = this.control.handleUpdate(update); const callback = update.callback_query; if (callback) await this.telegram.answerCallback(callback.id, result.ignored ? 'Not authorized' : 'Saved');
+        const result = await this.control.handleUpdate(update); const callback = update.callback_query; if (callback) await this.telegram.answerCallback(callback.id, result.ignored ? 'Not authorized' : 'Saved');
         const message = callback?.message || update.message; if (result.ignored || message?.chat?.id !== Number(this.config.telegram.ownerChatId)) continue;
         let text;
         if (result.type === 'approved') {
@@ -74,6 +74,7 @@ export class Phase2Service {
           text = 'تم تسجيل طلب التعديل وإنشاء مراجعة جديدة.';
         } else text = result.type === 'rejected' ? 'تم رفض الفيديو ولن يتم نشره.' : result.type === 'skipped' ? 'تم تخطي اليوم ولن يتم إنشاء بديل تلقائيًا.' : result.text || (result.type === 'status' ? `الحالة: ${result.items.map((item) => `${item.topic} — ${item.state}`).join('\n') || 'لا يوجد محتوى بعد'}` : 'تم استلام طلبك.');
         await this.telegram.call('sendMessage', { chat_id: message.chat.id, text });
+        this.store.recordConversationTurn({ chatId: message.chat.id, role: 'assistant', text, outcome: result.type });
       } catch (error) { this.store.audit('TELEGRAM_UPDATE_FAILED', 'service', { error: redact(error.message).slice(0, 160) }); }
     }
   }

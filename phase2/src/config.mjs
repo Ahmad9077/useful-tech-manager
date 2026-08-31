@@ -35,6 +35,7 @@ export function loadConfig(env = process.env) {
     cartesiaVoiceId: all.CARTESIA_VOICE_ID || '',
     geminiKeychainService: all.GEMINI_KEYCHAIN_SERVICE || '',
     geminiKeychainAccount: all.GEMINI_KEYCHAIN_ACCOUNT || '',
+    geminiModel: all.GEMINI_SEMANTIC_MODEL || 'gemini-3.5-flash-lite',
     tiktokSandbox: {
       clientKey: all.TIKTOK_SANDBOX_CLIENT_KEY || '',
       clientSecret: all.TIKTOK_SANDBOX_CLIENT_SECRET || '',

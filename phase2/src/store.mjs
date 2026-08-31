@@ -56,6 +56,18 @@ export class Store {
       CREATE TABLE IF NOT EXISTS telegram_updates(update_id INTEGER PRIMARY KEY, received_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS telegram_nonces(nonce TEXT PRIMARY KEY, action TEXT NOT NULL, expires_at TEXT NOT NULL, used_at TEXT);
       CREATE TABLE IF NOT EXISTS telegram_callbacks(nonce TEXT PRIMARY KEY, action TEXT NOT NULL, content_id TEXT NOT NULL, revision_number INTEGER NOT NULL, revision_fingerprint TEXT NOT NULL, expires_at TEXT NOT NULL, used_at TEXT);
+      CREATE TABLE IF NOT EXISTS telegram_conversation_turns(
+        id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, update_id INTEGER, role TEXT NOT NULL CHECK(role IN ('user','assistant')),
+        text TEXT NOT NULL, interpretation_json TEXT NOT NULL DEFAULT '{}', outcome TEXT, created_at TEXT NOT NULL,
+        UNIQUE(chat_id, update_id, role)
+      );
+      CREATE TABLE IF NOT EXISTS telegram_conversation_state(
+        chat_id TEXT PRIMARY KEY, active_content_id TEXT, active_revision_number INTEGER, idea_options_json TEXT NOT NULL DEFAULT '[]',
+        one_time_preferences_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS telegram_semantic_rate_limits(
+        chat_id TEXT PRIMARY KEY, window_started TEXT NOT NULL, call_count INTEGER NOT NULL, updated_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS editorial_preferences(id TEXT PRIMARY KEY, rule_text TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, source TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS analytics_snapshots(id INTEGER PRIMARY KEY, content_id TEXT REFERENCES content_items(content_id), captured_at TEXT NOT NULL, views INTEGER, likes INTEGER, shares INTEGER, comments INTEGER, followers INTEGER, raw_json TEXT NOT NULL DEFAULT '{}');
       CREATE TABLE IF NOT EXISTS archive_records(content_id TEXT PRIMARY KEY, revision_number INTEGER NOT NULL, archive_path TEXT NOT NULL UNIQUE, artifact_sha256 TEXT NOT NULL, archived_at TEXT NOT NULL, FOREIGN KEY(content_id,revision_number) REFERENCES content_revisions(content_id,revision_number));
@@ -141,6 +153,51 @@ export class Store {
   queueJob(kind, payload, runAfter = isoNow(), idempotencyKey = `${kind}:${randomId()}`) { const now = isoNow(); this.db.prepare('INSERT OR IGNORE INTO workflow_jobs VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(randomId(), kind, json(payload), 'QUEUED', runAfter, null, 0, idempotencyKey, now, now, null); }
   queueOutbox(kind, payload, idempotencyKey) { const now = isoNow(); this.db.prepare('INSERT OR IGNORE INTO outbox VALUES(?,?,?,?,?,?,?,?,?,?)').run(randomId(), kind, json(payload), 'QUEUED', 0, now, idempotencyKey, now, now, null); }
   listContent(limit = 50) { return this.db.prepare('SELECT * FROM content_items ORDER BY updated_at DESC LIMIT ?').all(limit); }
+  recordConversationTurn({ chatId, updateId = null, role, text, interpretation = {}, outcome = null }) {
+    if (!['user', 'assistant'].includes(role)) throw new Error('Invalid conversation role');
+    const safeText = String(text || '').replaceAll('\u0000', '').trim().slice(0, 1600); if (!safeText) return null;
+    const now = isoNow(); const id = randomId();
+    this.db.prepare('INSERT OR IGNORE INTO telegram_conversation_turns VALUES(?,?,?,?,?,?,?,?)').run(id, String(chatId), Number.isInteger(updateId) ? updateId : null, role, safeText, json(interpretation), outcome ? String(outcome).slice(0, 120) : null, now);
+    return id;
+  }
+  getConversationTurns(chatId, limit = 12) {
+    return this.db.prepare('SELECT role,text,outcome,created_at FROM telegram_conversation_turns WHERE chat_id=? ORDER BY created_at DESC LIMIT ?').all(String(chatId), Math.max(1, Math.min(Number(limit) || 12, 12))).reverse();
+  }
+  getConversationState(chatId) {
+    const row = this.db.prepare('SELECT * FROM telegram_conversation_state WHERE chat_id=?').get(String(chatId));
+    return row ? { ...row, active_revision_number: row.active_revision_number === null ? null : Number(row.active_revision_number), ideaOptions: parseJson(row.idea_options_json), oneTimePreferences: parseJson(row.one_time_preferences_json) } : { chat_id: String(chatId), active_content_id: null, active_revision_number: null, ideaOptions: [], oneTimePreferences: [] };
+  }
+  updateConversationState(chatId, { activeContentId = undefined, activeRevisionNumber = undefined, ideaOptions = undefined, oneTimePreferences = undefined } = {}) {
+    return this.transaction(() => {
+      const current = this.getConversationState(chatId); const now = isoNow();
+      const next = {
+        activeContentId: activeContentId === undefined ? current.active_content_id : activeContentId,
+        activeRevisionNumber: activeRevisionNumber === undefined ? current.active_revision_number : activeRevisionNumber,
+        ideaOptions: ideaOptions === undefined ? current.ideaOptions : ideaOptions,
+        oneTimePreferences: oneTimePreferences === undefined ? current.oneTimePreferences : oneTimePreferences,
+      };
+      this.db.prepare('INSERT INTO telegram_conversation_state(chat_id,active_content_id,active_revision_number,idea_options_json,one_time_preferences_json,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET active_content_id=excluded.active_content_id,active_revision_number=excluded.active_revision_number,idea_options_json=excluded.idea_options_json,one_time_preferences_json=excluded.one_time_preferences_json,updated_at=excluded.updated_at').run(String(chatId), next.activeContentId || null, Number.isInteger(next.activeRevisionNumber) ? next.activeRevisionNumber : null, json(Array.isArray(next.ideaOptions) ? next.ideaOptions.slice(0, 8) : []), json(Array.isArray(next.oneTimePreferences) ? next.oneTimePreferences.slice(0, 8) : []), now);
+      return this.getConversationState(chatId);
+    });
+  }
+  recordInterpretation({ chatId, updateId, interpretation, outcome }) {
+    this.db.prepare("UPDATE telegram_conversation_turns SET interpretation_json=?,outcome=? WHERE chat_id=? AND update_id=? AND role='user'").run(json(interpretation), String(outcome || '').slice(0, 120), String(chatId), Number(updateId));
+  }
+  consumeSemanticQuota(chatId, { limit = 20, windowMs = 60_000 } = {}) {
+    return this.transaction(() => {
+      const now = isoNow(); const row = this.db.prepare('SELECT * FROM telegram_semantic_rate_limits WHERE chat_id=?').get(String(chatId));
+      const fresh = !row || Date.now() - Date.parse(row.window_started) >= windowMs;
+      const count = fresh ? 1 : Number(row.call_count) + 1;
+      if (count > limit) return false;
+      this.db.prepare('INSERT INTO telegram_semantic_rate_limits(chat_id,window_started,call_count,updated_at) VALUES(?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET window_started=excluded.window_started,call_count=excluded.call_count,updated_at=excluded.updated_at').run(String(chatId), fresh ? now : row.window_started, count, now);
+      return true;
+    });
+  }
+  activeConversationContent(chatId) {
+    const state = this.getConversationState(chatId);
+    if (state.active_content_id) { const item = this.getContent(state.active_content_id); if (item && !['PUBLISHED', 'REJECTED', 'SKIPPED', 'FAILED'].includes(item.state)) return item; }
+    return this.db.prepare("SELECT * FROM content_items WHERE state IN ('READY_FOR_REVIEW','REVISION_REQUESTED','REVISING','PRODUCING','QC','SCRIPTING','RESEARCHING','IDEA_DISCOVERED') ORDER BY updated_at DESC LIMIT 1").get() || null;
+  }
   isNewTelegramUpdate(updateId) { try { this.db.prepare('INSERT INTO telegram_updates VALUES(?,?)').run(updateId, isoNow()); return true; } catch { return false; } }
   issueTelegramCallback({ action, contentId, revisionNumber, fingerprint, expiresAt }) { const nonce = randomId(9); this.db.prepare('INSERT INTO telegram_callbacks VALUES(?,?,?,?,?,?,NULL)').run(nonce, action, contentId, revisionNumber, fingerprint, new Date(expiresAt).toISOString()); return nonce; }
   consumeTelegramCallback(nonce) { return this.transaction(() => { const row = this.db.prepare('SELECT * FROM telegram_callbacks WHERE nonce=? AND used_at IS NULL AND expires_at>?').get(nonce, isoNow()); if (!row) return null; this.db.prepare('UPDATE telegram_callbacks SET used_at=? WHERE nonce=? AND used_at IS NULL').run(isoNow(), nonce); return row; }); }
