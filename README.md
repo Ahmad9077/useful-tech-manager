@@ -14,6 +14,6 @@ The site is plain static HTML and CSS with no dashboard, authentication, TikTok 
 
 Open `index.html` directly in a browser, or serve this directory with any static HTTP server.
 
-## Contact placeholder
+## Contact
 
-`contact@usefultech.example` is intentionally marked as a placeholder. Replace it with a monitored public project email before final TikTok Developer App submission.
+For privacy, data-deletion, and service questions, contact [useful.tech.ar@gmail.com](mailto:useful.tech.ar@gmail.com).
