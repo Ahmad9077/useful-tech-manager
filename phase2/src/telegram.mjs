@@ -87,7 +87,7 @@ export class TelegramControl {
     if (!active) return { type: 'active-status', active: null, text: 'ما عندي مهمة إنتاج شغالة حالياً.' };
     const stageNames = { DISCOVERING_IDEAS: 'أبحث وأقيّم الأفكار', RESEARCHING: 'أبحث في المصادر', FACT_CHECKING: 'أتأكد من المعلومات', SELECTING_IDEA: 'أختار الفكرة', WRITING_SCRIPT: 'أكتب النص', GENERATING_VOICE: 'أجهز التعليق الصوتي', BUILDING_VISUALS: 'أبني المشاهد', RENDERING: 'أرندر الفيديو', QC: 'أراجع الجودة', READY_FOR_REVIEW: 'النسخة جاهزة للمراجعة', REVISING: 'أجهز تعديل جديد', SANDBOX_TEST_COMPLETE: 'اكتمل اختبار Sandbox الخاص' };
     const p = active.progress || {}; const stage = stageNames[p.current_stage] || p.current_stage || active.item.state;
-    const prefix = p.worker_status === 'RUNNING' ? 'إي، قاعد أشتغل على فيديو جديد.' : 'إي، المهمة محفوظة ومتابَعَة حالياً.';
+    const prefix = p.worker_status === 'RUNNING' ? 'إي، قاعد أشتغل على فيديو جديد.' : p.worker_status === 'QUEUED' ? 'إي، المهمة في طابور العامل وبتبدأ تلقائياً.' : p.worker_status === 'WAITING' ? 'لا، ما في عامل إنتاج شغّال الآن؛ المهمة واقفة عند مرحلة محفوظة.' : 'إي، المهمة محفوظة ومتابَعَة حالياً.';
     return { type: 'active-status', active, text: `${prefix}\nالموضوع: ${active.item.topic}\nالحالة: ${stage}` };
   }
   historyResult() {
