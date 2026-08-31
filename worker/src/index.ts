@@ -22,6 +22,7 @@ const OAUTH_SCOPES = ["user.info.basic", "user.info.stats", "video.list", "video
 const MAX_VIDEO_BYTES = 64 * 1024 * 1024;
 const SESSION_SECONDS = 8 * 60 * 60;
 const OAUTH_SECONDS = 10 * 60;
+const TIKTOK_REQUEST_TIMEOUT_MS = 25_000;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -197,11 +198,24 @@ async function session(request: Request, env: Env, mutation = false): Promise<Se
   }
   return row;
 }
+async function fetchTikTok(input: string, init: RequestInit = {}): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), TIKTOK_REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (controller.signal.aborted) throw new AppError("TikTok did not respond in time. No retry was started automatically.", 504);
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function tikTokJson(path: string, token: string, init: RequestInit = {}): Promise<Record<string, unknown>> {
   const headers = new Headers(init.headers);
   headers.set("authorization", `Bearer ${token}`);
   if (init.body) headers.set("content-type", "application/json; charset=UTF-8");
-  const response = await fetch(`${TIKTOK_API}${path}`, { ...init, headers });
+  const response = await fetchTikTok(`${TIKTOK_API}${path}`, { ...init, headers });
   const payload = await response.json<Record<string, unknown>>().catch(() => ({}));
   const apiError = (payload.error || {}) as Record<string, unknown>;
   if (!response.ok || (payload.error && apiError.code !== "ok")) throw new AppError(`TikTok API request could not be completed (${String(apiError.code || response.status)}).`, 502);
@@ -264,7 +278,7 @@ async function publishVideo(request: Request, env: Env): Promise<Response> {
   for (let start = 0; start < file.size; start += chunkSize) {
     const end = Math.min(file.size, start + chunkSize);
     const body = await file.slice(start, end).arrayBuffer();
-    const upload = await fetch(uploadUrl, { method: "PUT", headers: { "content-type": "video/mp4", "content-length": String(end - start), "content-range": `bytes ${start}-${end - 1}/${file.size}` }, body });
+    const upload = await fetchTikTok(uploadUrl, { method: "PUT", headers: { "content-type": "video/mp4", "content-length": String(end - start), "content-range": `bytes ${start}-${end - 1}/${file.size}` }, body });
     if (!(upload.status === 201 || upload.status === 206)) throw new AppError("TikTok could not receive the private test video.", 502);
   }
   const id = randomUrl(18);
