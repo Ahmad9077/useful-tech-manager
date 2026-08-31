@@ -1,0 +1,9 @@
+{
+  "name": "useful-tech-manager-worker",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "check": "npx wrangler deploy --dry-run",
+    "deploy": "npx wrangler deploy"
+  }
+}

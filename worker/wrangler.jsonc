@@ -1,0 +1,14 @@
+{
+  "name": "useful-tech-manager-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-31",
+  "workers_dev": true,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "useful-tech-manager-db",
+      "database_id": "426993a4-5647-4e2c-88e3-be53b765f61a",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

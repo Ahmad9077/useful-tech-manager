@@ -114,6 +114,18 @@ h3 { margin-bottom: 10px; font-size: 1.22rem; font-weight: 735; }
   font-size: 0.96rem;
 }
 
+.hero-action { margin: 22px 0 0; }
+.button {
+  display: inline-block;
+  padding: 12px 17px;
+  border-radius: 9px;
+  color: #fff;
+  background: var(--teal-dark);
+  font-weight: 720;
+  text-decoration: none;
+}
+.button:hover { background: var(--ink); }
+
 .section { padding: 72px 0; border-top: 1px solid var(--line); }
 .section-heading { max-width: 640px; margin-bottom: 30px; }
 
