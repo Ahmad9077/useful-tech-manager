@@ -119,6 +119,9 @@ export class Phase2Service {
     return this.queueNextStage(contentId, revisionNumber, nextStage);
   }
   watchdog() {
+    // A service restart can leave a claimed child process behind. Recover leases on
+    // every watchdog pass, not just at startup, so an expired claim is actionable.
+    this.scheduler.recoverExpiredLeases();
     const now = isoNow(); const rows = this.store.db.prepare("SELECT c.content_id,c.current_revision,p.* FROM content_items c JOIN content_progress p ON p.content_id=c.content_id WHERE c.state IN ('IDEA_DISCOVERED','RESEARCHING','SCRIPTING','PRODUCING','QC','REVISING')").all();
     for (const row of rows) {
       const current = this.store.getProgress(row.content_id); const dueRetry = current.worker_status === 'WAITING' && current.next_retry_at && current.next_retry_at <= now;
