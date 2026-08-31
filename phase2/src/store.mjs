@@ -130,6 +130,14 @@ export class Store {
     if (status === 'COMPLETE') this.transition(contentId, 'PUBLISHED', 'sandbox-publisher');
     if (status === 'FAILED') this.transition(contentId, 'APPROVED', 'sandbox-publisher');
   }
+  retryFailedSandboxPublish(contentId, revisionNumber) {
+    return this.transaction(() => {
+      const result = this.assertPublishable(contentId, revisionNumber, 'sandbox');
+      if (result.intent.status !== 'FAILED' || result.intent.remote_publish_id) throw new Error('Only an uninitialised failed Sandbox publish may be retried');
+      this.db.prepare("UPDATE publish_intents SET status='QUEUED',error_code=NULL,updated_at=? WHERE id=? AND status='FAILED' AND remote_publish_id IS NULL").run(isoNow(), result.intent.id);
+      this.audit('PUBLISH_RETRY_QUEUED', 'sandbox-publisher', { contentId, revisionNumber }); return this.assertPublishable(contentId, revisionNumber, 'sandbox');
+    });
+  }
   queueJob(kind, payload, runAfter = isoNow(), idempotencyKey = `${kind}:${randomId()}`) { const now = isoNow(); this.db.prepare('INSERT OR IGNORE INTO workflow_jobs VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(randomId(), kind, json(payload), 'QUEUED', runAfter, null, 0, idempotencyKey, now, now, null); }
   queueOutbox(kind, payload, idempotencyKey) { const now = isoNow(); this.db.prepare('INSERT OR IGNORE INTO outbox VALUES(?,?,?,?,?,?,?,?,?,?)').run(randomId(), kind, json(payload), 'QUEUED', 0, now, idempotencyKey, now, now, null); }
   listContent(limit = 50) { return this.db.prepare('SELECT * FROM content_items ORDER BY updated_at DESC LIMIT ?').all(limit); }
