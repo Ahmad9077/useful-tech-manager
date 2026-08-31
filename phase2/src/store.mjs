@@ -291,6 +291,16 @@ export class Store {
     }
     return recovered;
   }
+  resumeFailedAtStage({ contentId, revisionNumber, stage, reason = 'Recovered after a corrected local worker error' }) {
+    if (!AUTOMATED_STAGES.includes(stage)) throw new Error('Can only resume an automated stage');
+    return this.transaction(() => {
+      const item = this.getContent(contentId); if (!item || item.state !== 'FAILED' || item.current_revision !== Number(revisionNumber)) throw new Error('Content is not eligible for targeted resume');
+      const state = ['WRITING_SCRIPT'].includes(stage) ? 'SCRIPTING' : ['GENERATING_VOICE','BUILDING_VISUALS','RENDERING'].includes(stage) ? 'PRODUCING' : stage === 'QC' ? 'QC' : 'RESEARCHING';
+      this.db.prepare('UPDATE content_items SET state=?,updated_at=? WHERE content_id=?').run(state, isoNow(), contentId);
+      this.updateProgress({ contentId, stage, workerStatus: 'QUEUED', jobId: null, waitingReason: null, waitingSince: null, nextRetryAt: null, lastError: null });
+      this.audit('CONTENT_RESUMED_FROM_FAILURE', 'recovery', { contentId, revisionNumber, stage, reason }); return this.getContent(contentId);
+    });
+  }
   findActiveStageJob(contentId, revisionNumber, stage) { return this.db.prepare("SELECT * FROM workflow_jobs WHERE kind='RUN_STAGE' AND status IN ('QUEUED','CLAIMED') AND json_extract(payload_json,'$.contentId')=? AND json_extract(payload_json,'$.revisionNumber')=? AND json_extract(payload_json,'$.stage')=? ORDER BY created_at DESC LIMIT 1").get(contentId, Number(revisionNumber), stage) || null; }
   queueStageIfAbsent({ contentId, revisionNumber, stage, runAfter = isoNow(), attempt = 0 }) {
     const existing = this.findActiveStageJob(contentId, revisionNumber, stage); if (existing) return { inserted: false, job: existing };
