@@ -105,9 +105,9 @@ async function beginOAuth(request: Request, env: Env): Promise<Response> {
   auth.searchParams.set("scope", OAUTH_SCOPES.join(","));
   auth.searchParams.set("redirect_uri", redirectUri(request));
   auth.searchParams.set("state", state);
-  const response = Response.redirect(auth.toString(), 302);
-  response.headers.set("set-cookie", cookie("__Host-utm_oauth", verifier, OAUTH_SECONDS));
-  return response;
+  const headers = new Headers({ location: auth.toString() });
+  headers.set("set-cookie", cookie("__Host-utm_oauth", verifier, OAUTH_SECONDS));
+  return new Response(null, { status: 302, headers });
 }
 
 async function finishOAuth(request: Request, env: Env): Promise<Response> {
@@ -134,10 +134,10 @@ async function finishOAuth(request: Request, env: Env): Promise<Response> {
   const csrf = randomUrl();
   await env.DB.prepare("INSERT INTO sessions (session_hash, open_id, csrf_token, csrf_hash, expires_at) VALUES (?, ?, ?, ?, ?)")
     .bind(await hash(session), token.open_id, csrf, await hash(csrf), now() + SESSION_SECONDS).run();
-  const response = Response.redirect(new URL("/app#connected", request.url), 302);
-  response.headers.append("set-cookie", expireCookie("__Host-utm_oauth"));
-  response.headers.append("set-cookie", cookie("__Host-utm_session", session, SESSION_SECONDS));
-  return response;
+  const headers = new Headers({ location: new URL("/app#connected", request.url).toString() });
+  headers.append("set-cookie", expireCookie("__Host-utm_oauth"));
+  headers.append("set-cookie", cookie("__Host-utm_session", session, SESSION_SECONDS));
+  return new Response(null, { status: 302, headers });
 }
 
 async function tokenRequest(form: URLSearchParams): Promise<Record<string, unknown>> {
