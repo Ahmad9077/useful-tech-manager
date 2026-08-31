@@ -9,6 +9,14 @@ export class DurableScheduler {
       const leaseUntil = new Date(Date.now() + 5 * 60_000).toISOString(); const result = this.store.db.prepare("UPDATE workflow_jobs SET status='CLAIMED',attempts=attempts+1,lease_until=?,updated_at=? WHERE id=? AND status='QUEUED'").run(leaseUntil, now, job.id); return result.changes ? { ...job, lease_until: leaseUntil } : null;
     });
   }
-  finish(jobId, error = null) { const now = isoNow(); this.store.db.prepare('UPDATE workflow_jobs SET status=?,error_code=?,lease_until=NULL,updated_at=? WHERE id=?').run(error ? 'FAILED' : 'DONE', error ? String(error).slice(0, 160) : null, now, jobId); }
+  claimJob(jobId) {
+    return this.store.transaction(() => {
+      const now = isoNow(); const job = this.store.db.prepare("SELECT * FROM workflow_jobs WHERE id=? AND status='QUEUED'").get(jobId); if (!job) return null;
+      const leaseUntil = new Date(Date.now() + 5 * 60_000).toISOString(); const result = this.store.db.prepare("UPDATE workflow_jobs SET status='CLAIMED',attempts=attempts+1,lease_until=?,updated_at=? WHERE id=? AND status='QUEUED'").run(leaseUntil, now, job.id);
+      return result.changes ? { ...job, lease_until: leaseUntil } : null;
+    });
+  }
+  extendLease(jobId) { this.store.db.prepare("UPDATE workflow_jobs SET lease_until=?,updated_at=? WHERE id=? AND status='CLAIMED'").run(new Date(Date.now() + 5 * 60_000).toISOString(), isoNow(), jobId); }
+  finish(jobId, error = null) { const now = isoNow(); this.store.db.prepare("UPDATE workflow_jobs SET status=?,error_code=?,lease_until=NULL,updated_at=? WHERE id=? AND status='CLAIMED'").run(error ? 'FAILED' : 'DONE', error ? String(error).slice(0, 160) : null, now, jobId); }
   recoverExpiredLeases() { this.store.db.prepare("UPDATE workflow_jobs SET status='QUEUED',lease_until=NULL,updated_at=? WHERE status='CLAIMED' AND lease_until<?").run(isoNow(), isoNow()); }
 }

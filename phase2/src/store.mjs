@@ -4,6 +4,8 @@ import path from 'node:path';
 import { isoNow, json, parseJson, randomId, secureEqual, sha256 } from './util.mjs';
 
 export const STATES = Object.freeze(['IDEA_DISCOVERED', 'RESEARCHING', 'SCRIPTING', 'PRODUCING', 'QC', 'READY_FOR_REVIEW', 'REVISION_REQUESTED', 'REVISING', 'APPROVED', 'ARCHIVED', 'PUBLISHING', 'PUBLISHED', 'REJECTED', 'SKIPPED', 'FAILED']);
+export const ACTIVE_STATES = Object.freeze(['IDEA_DISCOVERED', 'RESEARCHING', 'SCRIPTING', 'PRODUCING', 'QC', 'READY_FOR_REVIEW', 'REVISION_REQUESTED', 'REVISING', 'APPROVED', 'ARCHIVED', 'PUBLISHING']);
+export const PROGRESS_STAGES = Object.freeze(['DISCOVERING_IDEAS', 'RESEARCHING', 'FACT_CHECKING', 'SELECTING_IDEA', 'WRITING_SCRIPT', 'GENERATING_VOICE', 'BUILDING_VISUALS', 'RENDERING', 'QC', 'READY_FOR_REVIEW', 'REVISION_REQUESTED', 'REVISING', 'APPROVED', 'ARCHIVED', 'PUBLISHING', 'PUBLISHED', 'FAILED', 'SANDBOX_TEST_COMPLETE']);
 const canTransition = new Map([
   ['IDEA_DISCOVERED', new Set(['RESEARCHING', 'SKIPPED', 'FAILED'])],
   ['RESEARCHING', new Set(['SCRIPTING', 'SKIPPED', 'FAILED'])],
@@ -65,6 +67,17 @@ export class Store {
         chat_id TEXT PRIMARY KEY, active_content_id TEXT, active_revision_number INTEGER, idea_options_json TEXT NOT NULL DEFAULT '[]',
         one_time_preferences_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS content_progress(
+        content_id TEXT PRIMARY KEY REFERENCES content_items(content_id) ON DELETE CASCADE,
+        current_stage TEXT NOT NULL, worker_status TEXT NOT NULL CHECK(worker_status IN ('QUEUED','RUNNING','WAITING','IDLE','FAILED','COMPLETE')),
+        job_id TEXT, started_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_successful_step TEXT, last_error TEXT
+      );
+      CREATE TABLE IF NOT EXISTS content_publication_classification(
+        content_id TEXT PRIMARY KEY REFERENCES content_items(content_id) ON DELETE CASCADE,
+        environment TEXT NOT NULL CHECK(environment IN ('sandbox','production','none')),
+        visibility TEXT NOT NULL CHECK(visibility IN ('SELF_ONLY','PUBLIC','DRAFT','NOT_PUBLISHED')),
+        updated_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS telegram_semantic_rate_limits(
         chat_id TEXT PRIMARY KEY, window_started TEXT NOT NULL, call_count INTEGER NOT NULL, updated_at TEXT NOT NULL
       );
@@ -73,6 +86,13 @@ export class Store {
       CREATE TABLE IF NOT EXISTS archive_records(content_id TEXT PRIMARY KEY, revision_number INTEGER NOT NULL, archive_path TEXT NOT NULL UNIQUE, artifact_sha256 TEXT NOT NULL, archived_at TEXT NOT NULL, FOREIGN KEY(content_id,revision_number) REFERENCES content_revisions(content_id,revision_number));
       CREATE TABLE IF NOT EXISTS audit_events(id TEXT PRIMARY KEY, content_id TEXT, revision_number INTEGER, event_type TEXT NOT NULL, actor TEXT NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL);
     `);
+    // Safe additive migrations for databases created before conversational progress existed.
+    try { this.db.exec('ALTER TABLE telegram_conversation_state ADD COLUMN last_bot_action TEXT'); } catch { /* already present */ }
+    const now = isoNow();
+    this.db.prepare("INSERT OR IGNORE INTO content_progress(content_id,current_stage,worker_status,job_id,started_at,updated_at,last_successful_step,last_error) SELECT content_id,CASE WHEN state='PUBLISHED' THEN 'PUBLISHED' WHEN state='READY_FOR_REVIEW' THEN 'READY_FOR_REVIEW' WHEN state='FAILED' THEN 'FAILED' ELSE state END,CASE WHEN state IN ('PUBLISHED','REJECTED','SKIPPED','FAILED') THEN 'COMPLETE' ELSE 'IDLE' END,NULL,created_at,updated_at,NULL,NULL FROM content_items").run();
+    this.db.prepare("INSERT OR IGNORE INTO content_publication_classification(content_id,environment,visibility,updated_at) SELECT content_id,'none','NOT_PUBLISHED',updated_at FROM content_items").run();
+    this.db.prepare("UPDATE content_publication_classification SET environment='sandbox',visibility='SELF_ONLY',updated_at=? WHERE content_id IN (SELECT content_id FROM publish_intents WHERE environment='sandbox')").run(now);
+    this.db.prepare("UPDATE content_progress SET current_stage='SANDBOX_TEST_COMPLETE',worker_status='COMPLETE',updated_at=? WHERE content_id IN (SELECT content_id FROM publish_intents WHERE environment='sandbox' AND status='COMPLETE')").run(now);
   }
   close() { this.db.close(); }
   transaction(fn) { this.db.exec('BEGIN IMMEDIATE'); try { const value = fn(); this.db.exec('COMMIT'); return value; } catch (error) { this.db.exec('ROLLBACK'); throw error; } }
@@ -82,10 +102,41 @@ export class Store {
       const now = isoNow(); const id = contentId || `UT-${now.slice(0, 10).replaceAll('-', '')}-${randomId(4).toUpperCase()}`;
       this.db.prepare('INSERT INTO content_items VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(id, topic, category, 'IDEA_DISCOVERED', 1, ideaScore, hook, hookType, now, now, null, null);
       this.db.prepare('INSERT INTO content_revisions(content_id,revision_number,created_at) VALUES(?,?,?)').run(id, 1, now);
+      this.db.prepare('INSERT INTO content_progress VALUES(?,?,?,?,?,?,?,?)').run(id, 'DISCOVERING_IDEAS', 'QUEUED', null, now, now, null, null);
+      this.db.prepare('INSERT INTO content_publication_classification VALUES(?,?,?,?)').run(id, 'none', 'NOT_PUBLISHED', now);
       this.audit('CONTENT_CREATED', 'system', { contentId: id, revisionNumber: 1 }); return this.getContent(id);
     });
   }
+  createAndQueueContentTask({ chatId, topic, category = 'useful-app', hook = '', hookType = 'editorial-choice', ideaScore = null, payload = {} }) {
+    return this.transaction(() => {
+      const now = isoNow(); const contentId = `UT-${now.slice(0, 10).replaceAll('-', '')}-${randomId(4).toUpperCase()}`;
+      this.db.prepare('INSERT INTO content_items VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(contentId, topic, category, 'IDEA_DISCOVERED', 1, ideaScore, hook, hookType, now, now, null, null);
+      this.db.prepare('INSERT INTO content_revisions(content_id,revision_number,created_at) VALUES(?,?,?)').run(contentId, 1, now);
+      this.db.prepare('INSERT INTO content_progress VALUES(?,?,?,?,?,?,?,?)').run(contentId, 'DISCOVERING_IDEAS', 'QUEUED', null, now, now, null, null);
+      this.db.prepare('INSERT INTO content_publication_classification VALUES(?,?,?,?)').run(contentId, 'none', 'NOT_PUBLISHED', now);
+      const job = this.queueJob('RUN_CONTENT_PIPELINE', { contentId, revisionNumber: 1, ...payload }, now, `content-pipeline:${contentId}:r1`);
+      if (!job.inserted || !job.job) throw new Error('Durable production job was not created');
+      this.updateProgress({ contentId, stage: 'DISCOVERING_IDEAS', workerStatus: 'QUEUED', jobId: job.job.id, lastSuccessfulStep: null, lastError: null });
+      const conversation = this.getConversationState(chatId);
+      this.db.prepare('INSERT INTO telegram_conversation_state(chat_id,active_content_id,active_revision_number,idea_options_json,one_time_preferences_json,updated_at,last_bot_action) VALUES(?,?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET active_content_id=excluded.active_content_id,active_revision_number=excluded.active_revision_number,updated_at=excluded.updated_at,last_bot_action=excluded.last_bot_action').run(String(chatId), contentId, 1, json(conversation.ideaOptions), json(conversation.oneTimePreferences), now, 'START_NEW_CONTENT');
+      this.audit('CONTENT_TASK_QUEUED', 'telegram', { contentId, revisionNumber: 1, jobId: job.job.id });
+      return { content: this.getContent(contentId), job: job.job };
+    });
+  }
   getContent(contentId) { const row = this.db.prepare('SELECT * FROM content_items WHERE content_id=?').get(contentId); return row && { ...row, current_revision: Number(row.current_revision) }; }
+  getProgress(contentId) { return this.db.prepare('SELECT * FROM content_progress WHERE content_id=?').get(contentId) || null; }
+  updateProgress({ contentId, stage, workerStatus, jobId = undefined, lastSuccessfulStep = undefined, lastError = undefined }) {
+    if (!PROGRESS_STAGES.includes(stage)) throw new Error('Invalid content progress stage');
+    if (!['QUEUED','RUNNING','WAITING','IDLE','FAILED','COMPLETE'].includes(workerStatus)) throw new Error('Invalid worker status');
+    const current = this.getProgress(contentId); if (!current) throw new Error('Unknown content progress'); const now = isoNow();
+    this.db.prepare('UPDATE content_progress SET current_stage=?,worker_status=?,job_id=?,updated_at=?,last_successful_step=?,last_error=? WHERE content_id=?').run(stage, workerStatus, jobId === undefined ? current.job_id : jobId, now, lastSuccessfulStep === undefined ? current.last_successful_step : lastSuccessfulStep, lastError === undefined ? current.last_error : (lastError ? String(lastError).slice(0, 240) : null), contentId);
+    return this.getProgress(contentId);
+  }
+  activeTaskForChat(chatId) {
+    const state = this.getConversationState(chatId); if (!state.active_content_id) return null;
+    const item = this.getContent(state.active_content_id); if (!item || !ACTIVE_STATES.includes(item.state)) return null;
+    return { item, progress: this.getProgress(item.content_id), conversation: state };
+  }
   getRevision(contentId, revisionNumber) { const row = this.db.prepare('SELECT * FROM content_revisions WHERE content_id=? AND revision_number=?').get(contentId, revisionNumber); return row && { ...row, script: parseJson(row.script_json), sources: parseJson(row.source_snapshot_json), settings: parseJson(row.posting_settings_json), qc: parseJson(row.qc_json) }; }
   setRevisionPlan({ contentId, revisionNumber, script, sources, actor = 'research' }) {
     return this.transaction(() => {
@@ -139,7 +190,11 @@ export class Store {
   markPublishStatus(contentId, revisionNumber, { status, remotePublishId = null, error = null }) {
     const allowed = new Set(['POLLING', 'COMPLETE', 'FAILED']); if (!allowed.has(status)) throw new Error('Invalid publish status');
     this.db.prepare('UPDATE publish_intents SET status=?,remote_publish_id=COALESCE(?,remote_publish_id),error_code=?,updated_at=? WHERE content_id=? AND revision_number=? AND environment=?').run(status, remotePublishId, error ? String(error).slice(0, 160) : null, isoNow(), contentId, revisionNumber, 'sandbox');
-    if (status === 'COMPLETE') this.transition(contentId, 'PUBLISHED', 'sandbox-publisher');
+    if (status === 'COMPLETE') {
+      this.classifyPublication(contentId, { environment: 'sandbox', visibility: 'SELF_ONLY' });
+      this.transition(contentId, 'PUBLISHED', 'sandbox-publisher');
+      this.updateProgress({ contentId, stage: 'SANDBOX_TEST_COMPLETE', workerStatus: 'COMPLETE', lastSuccessfulStep: 'Sandbox SELF_ONLY Direct Post complete' });
+    }
     if (status === 'FAILED') this.transition(contentId, 'APPROVED', 'sandbox-publisher');
   }
   retryFailedSandboxPublish(contentId, revisionNumber) {
@@ -150,9 +205,22 @@ export class Store {
       this.audit('PUBLISH_RETRY_QUEUED', 'sandbox-publisher', { contentId, revisionNumber }); return this.assertPublishable(contentId, revisionNumber, 'sandbox');
     });
   }
-  queueJob(kind, payload, runAfter = isoNow(), idempotencyKey = `${kind}:${randomId()}`) { const now = isoNow(); this.db.prepare('INSERT OR IGNORE INTO workflow_jobs VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(randomId(), kind, json(payload), 'QUEUED', runAfter, null, 0, idempotencyKey, now, now, null); }
+  queueJob(kind, payload, runAfter = isoNow(), idempotencyKey = `${kind}:${randomId()}`) {
+    const now = isoNow(); const id = randomId();
+    const result = this.db.prepare('INSERT OR IGNORE INTO workflow_jobs VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(id, kind, json(payload), 'QUEUED', runAfter, null, 0, idempotencyKey, now, now, null);
+    const job = result.changes ? this.db.prepare('SELECT * FROM workflow_jobs WHERE id=?').get(id) : this.db.prepare('SELECT * FROM workflow_jobs WHERE idempotency_key=?').get(idempotencyKey);
+    return { inserted: Boolean(result.changes), job };
+  }
   queueOutbox(kind, payload, idempotencyKey) { const now = isoNow(); this.db.prepare('INSERT OR IGNORE INTO outbox VALUES(?,?,?,?,?,?,?,?,?,?)').run(randomId(), kind, json(payload), 'QUEUED', 0, now, idempotencyKey, now, now, null); }
   listContent(limit = 50) { return this.db.prepare('SELECT * FROM content_items ORDER BY updated_at DESC LIMIT ?').all(limit); }
+  listPublicContent(limit = 50) {
+    return this.db.prepare("SELECT c.*,p.environment AS publication_environment,p.visibility AS publication_visibility FROM content_items c JOIN content_publication_classification p ON p.content_id=c.content_id WHERE p.environment='production' AND p.visibility='PUBLIC' AND c.state='PUBLISHED' ORDER BY c.updated_at DESC LIMIT ?").all(limit);
+  }
+  classifyPublication(contentId, { environment, visibility }) {
+    if (!['sandbox','production','none'].includes(environment)) throw new Error('Invalid publication environment');
+    if (!['SELF_ONLY','PUBLIC','DRAFT','NOT_PUBLISHED'].includes(visibility)) throw new Error('Invalid publication visibility');
+    this.db.prepare('INSERT INTO content_publication_classification VALUES(?,?,?,?) ON CONFLICT(content_id) DO UPDATE SET environment=excluded.environment,visibility=excluded.visibility,updated_at=excluded.updated_at').run(contentId, environment, visibility, isoNow());
+  }
   recordConversationTurn({ chatId, updateId = null, role, text, interpretation = {}, outcome = null }) {
     if (!['user', 'assistant'].includes(role)) throw new Error('Invalid conversation role');
     const safeText = String(text || '').replaceAll('\u0000', '').trim().slice(0, 1600); if (!safeText) return null;
@@ -165,9 +233,9 @@ export class Store {
   }
   getConversationState(chatId) {
     const row = this.db.prepare('SELECT * FROM telegram_conversation_state WHERE chat_id=?').get(String(chatId));
-    return row ? { ...row, active_revision_number: row.active_revision_number === null ? null : Number(row.active_revision_number), ideaOptions: parseJson(row.idea_options_json), oneTimePreferences: parseJson(row.one_time_preferences_json) } : { chat_id: String(chatId), active_content_id: null, active_revision_number: null, ideaOptions: [], oneTimePreferences: [] };
+    return row ? { ...row, active_revision_number: row.active_revision_number === null ? null : Number(row.active_revision_number), ideaOptions: parseJson(row.idea_options_json), oneTimePreferences: parseJson(row.one_time_preferences_json) } : { chat_id: String(chatId), active_content_id: null, active_revision_number: null, ideaOptions: [], oneTimePreferences: [], last_bot_action: null };
   }
-  updateConversationState(chatId, { activeContentId = undefined, activeRevisionNumber = undefined, ideaOptions = undefined, oneTimePreferences = undefined } = {}) {
+  updateConversationState(chatId, { activeContentId = undefined, activeRevisionNumber = undefined, ideaOptions = undefined, oneTimePreferences = undefined, lastBotAction = undefined } = {}) {
     return this.transaction(() => {
       const current = this.getConversationState(chatId); const now = isoNow();
       const next = {
@@ -175,8 +243,9 @@ export class Store {
         activeRevisionNumber: activeRevisionNumber === undefined ? current.active_revision_number : activeRevisionNumber,
         ideaOptions: ideaOptions === undefined ? current.ideaOptions : ideaOptions,
         oneTimePreferences: oneTimePreferences === undefined ? current.oneTimePreferences : oneTimePreferences,
+        lastBotAction: lastBotAction === undefined ? current.last_bot_action : lastBotAction,
       };
-      this.db.prepare('INSERT INTO telegram_conversation_state(chat_id,active_content_id,active_revision_number,idea_options_json,one_time_preferences_json,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET active_content_id=excluded.active_content_id,active_revision_number=excluded.active_revision_number,idea_options_json=excluded.idea_options_json,one_time_preferences_json=excluded.one_time_preferences_json,updated_at=excluded.updated_at').run(String(chatId), next.activeContentId || null, Number.isInteger(next.activeRevisionNumber) ? next.activeRevisionNumber : null, json(Array.isArray(next.ideaOptions) ? next.ideaOptions.slice(0, 8) : []), json(Array.isArray(next.oneTimePreferences) ? next.oneTimePreferences.slice(0, 8) : []), now);
+      this.db.prepare('INSERT INTO telegram_conversation_state(chat_id,active_content_id,active_revision_number,idea_options_json,one_time_preferences_json,updated_at,last_bot_action) VALUES(?,?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET active_content_id=excluded.active_content_id,active_revision_number=excluded.active_revision_number,idea_options_json=excluded.idea_options_json,one_time_preferences_json=excluded.one_time_preferences_json,updated_at=excluded.updated_at,last_bot_action=excluded.last_bot_action').run(String(chatId), next.activeContentId || null, Number.isInteger(next.activeRevisionNumber) ? next.activeRevisionNumber : null, json(Array.isArray(next.ideaOptions) ? next.ideaOptions.slice(0, 8) : []), json(Array.isArray(next.oneTimePreferences) ? next.oneTimePreferences.slice(0, 8) : []), now, next.lastBotAction || null);
       return this.getConversationState(chatId);
     });
   }
@@ -194,9 +263,22 @@ export class Store {
     });
   }
   activeConversationContent(chatId) {
-    const state = this.getConversationState(chatId);
-    if (state.active_content_id) { const item = this.getContent(state.active_content_id); if (item && !['PUBLISHED', 'REJECTED', 'SKIPPED', 'FAILED'].includes(item.state)) return item; }
-    return this.db.prepare("SELECT * FROM content_items WHERE state IN ('READY_FOR_REVIEW','REVISION_REQUESTED','REVISING','PRODUCING','QC','SCRIPTING','RESEARCHING','IDEA_DISCOVERED') ORDER BY updated_at DESC LIMIT 1").get() || null;
+    return this.activeTaskForChat(chatId)?.item || null;
+  }
+  recoverActiveJobs() {
+    const rows = this.db.prepare("SELECT p.*,c.state FROM content_progress p JOIN content_items c ON c.content_id=p.content_id WHERE c.state IN ('IDEA_DISCOVERED','RESEARCHING','SCRIPTING','PRODUCING','QC','REVISION_REQUESTED','REVISING')").all();
+    const recovered = [];
+    for (const row of rows) {
+      const job = row.job_id && this.db.prepare('SELECT * FROM workflow_jobs WHERE id=?').get(row.job_id);
+      if (job?.status === 'QUEUED') { this.updateProgress({ contentId: row.content_id, stage: row.current_stage, workerStatus: 'QUEUED', jobId: job.id, lastError: null }); recovered.push(row.content_id); continue; }
+      if (job?.status === 'CLAIMED') continue;
+      if (row.worker_status === 'RUNNING' || row.worker_status === 'QUEUED') {
+        const queued = this.queueJob('RUN_CONTENT_PIPELINE', { contentId: row.content_id, revisionNumber: this.getContent(row.content_id).current_revision }, isoNow(), `content-pipeline:${row.content_id}:r${this.getContent(row.content_id).current_revision}`);
+        if (queued.job?.status === 'QUEUED') { this.updateProgress({ contentId: row.content_id, stage: row.current_stage, workerStatus: 'QUEUED', jobId: queued.job.id, lastError: null }); recovered.push(row.content_id); }
+        else this.updateProgress({ contentId: row.content_id, stage: 'FAILED', workerStatus: 'FAILED', lastError: 'The durable worker job was not recoverable' });
+      }
+    }
+    return recovered;
   }
   isNewTelegramUpdate(updateId) { try { this.db.prepare('INSERT INTO telegram_updates VALUES(?,?)').run(updateId, isoNow()); return true; } catch { return false; } }
   issueTelegramCallback({ action, contentId, revisionNumber, fingerprint, expiresAt }) { const nonce = randomId(9); this.db.prepare('INSERT INTO telegram_callbacks VALUES(?,?,?,?,?,?,NULL)').run(nonce, action, contentId, revisionNumber, fingerprint, new Date(expiresAt).toISOString()); return nonce; }

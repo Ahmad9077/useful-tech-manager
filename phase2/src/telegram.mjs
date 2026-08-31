@@ -28,7 +28,7 @@ export function reviewKeyboard({ store, contentId, revisionNumber, fingerprint, 
   return { inline_keyboard: [[button('✅ Approve', 'approve'), button('✏️ Revise', 'revise')], [button('❌ Reject', 'reject'), button('⏭ Skip Today', 'skip')]] };
 }
 export class TelegramControl {
-  constructor({ store, config, signingSecret, interpreter = new GeminiSemanticInterpreter({ config }) }) { this.store = store; this.config = config; this.signingSecret = signingSecret; this.interpreter = interpreter; }
+  constructor({ store, config, signingSecret, interpreter = new GeminiSemanticInterpreter({ config }), startContent = null }) { this.store = store; this.config = config; this.signingSecret = signingSecret; this.interpreter = interpreter; this.startContent = startContent; }
   async handleUpdate(update) {
     if (!this.store.isNewTelegramUpdate(update.update_id)) return { ignored: 'replayed' };
     const callback = update.callback_query; const message = callback?.message || update.message; const sender = callback?.from || update.message?.from; const chatId = message?.chat?.id;
@@ -68,7 +68,7 @@ export class TelegramControl {
     const message = String(text || '').trim();
     this.store.recordConversationTurn({ chatId, updateId, role: 'user', text: message });
     // These exact slash commands are a narrow offline safety fallback. Natural language always uses the semantic model.
-    if (message === '/status') return this.statusResult();
+    if (message === '/status') return this.activeStatusResult(chatId);
     if (message === '/cancel') return this.cancelCurrent(chatId);
     if (!message) return { type: 'clarify', text: 'اكتب لي اللي تبيه بطريقتك، وأنا أرتبه لك.' };
     if (!this.store.consumeSemanticQuota(chatId)) return { type: 'rate-limited', text: 'وصلتني الرسائل. عطِني لحظة وأكمل معك.' };
@@ -79,29 +79,46 @@ export class TelegramControl {
     this.store.recordInterpretation({ chatId, updateId, interpretation: this.safeInterpretationRecord(interpretation), outcome: 'interpreted' });
     this.store.audit('SEMANTIC_INTERPRETATION', 'telegram', { intent: interpretation.intent, confidence: interpretation.confidence, contentReference: interpretation.contentReference, ideaIndex: interpretation.ideaIndex });
     if (interpretation.requiresClarification || interpretation.confidence < 0.55) return { type: 'clarify', text: 'أبي أتأكد من قصدك: تقصد الفيديو الحالي أو تبغى نبدأ فكرة جديدة؟' };
-    const result = this.executeSemanticIntent(interpretation, { message, userId, chatId });
+    const result = await this.executeSemanticIntent(interpretation, { message, userId, chatId });
     this.store.recordInterpretation({ chatId, updateId, interpretation: this.safeInterpretationRecord(interpretation), outcome: result.type }); return result;
   }
-  statusResult() { return { type: 'status', items: this.store.listContent(10), text: `الحالة: ${this.store.listContent(10).map((item) => `${item.topic} — ${item.state}`).join('\n') || 'ما عندنا محتوى قيد العمل حالياً.'}` }; }
+  activeStatusResult(chatId) {
+    const active = this.store.activeTaskForChat(chatId);
+    if (!active) return { type: 'active-status', active: null, text: 'ما عندي مهمة إنتاج شغالة حالياً.' };
+    const stageNames = { DISCOVERING_IDEAS: 'أبحث وأقيّم الأفكار', RESEARCHING: 'أبحث في المصادر', FACT_CHECKING: 'أتأكد من المعلومات', SELECTING_IDEA: 'أختار الفكرة', WRITING_SCRIPT: 'أكتب النص', GENERATING_VOICE: 'أجهز التعليق الصوتي', BUILDING_VISUALS: 'أبني المشاهد', RENDERING: 'أرندر الفيديو', QC: 'أراجع الجودة', READY_FOR_REVIEW: 'النسخة جاهزة للمراجعة', REVISING: 'أجهز تعديل جديد', SANDBOX_TEST_COMPLETE: 'اكتمل اختبار Sandbox الخاص' };
+    const p = active.progress || {}; const stage = stageNames[p.current_stage] || p.current_stage || active.item.state;
+    const prefix = p.worker_status === 'RUNNING' ? 'إي، قاعد أشتغل على فيديو جديد.' : 'إي، المهمة محفوظة ومتابَعَة حالياً.';
+    return { type: 'active-status', active, text: `${prefix}\nالموضوع: ${active.item.topic}\nالحالة: ${stage}` };
+  }
+  historyResult() {
+    const items = this.store.listPublicContent(10);
+    return { type: 'history', items, text: `الفيديوهات العامة السابقة:\n${items.map((item) => `${item.topic} — ${item.state}`).join('\n') || 'ما عندي فيديوهات عامة منشورة في السجل.'}` };
+  }
+  analyticsResult() { return { type: 'analytics', items: this.store.listPublicContent(10), text: 'بجهز لك ملخص الأداء من بيانات الإنتاج المتاحة.' }; }
   cancelCurrent(chatId) {
     const current = this.currentFor(chatId); if (!current) return { type: 'cancelled', text: 'ما عندنا شغل مفتوح ألغيّه حالياً.' };
     if (!['READY_FOR_REVIEW', 'REVISION_REQUESTED'].includes(current.state)) return { type: 'clarify', text: 'المحتوى الحالي في مرحلة تنفيذ، فخلني أكملها أو أعطني طلب تعديل محدد.' };
     this.store.transition(current.content_id, 'SKIPPED', 'telegram-cancel'); return { type: 'cancelled', text: 'تم إيقاف المحتوى الحالي، وما راح يننشر.' };
   }
-  executeSemanticIntent(interpretation, { message, userId, chatId }) {
+  async executeSemanticIntent(interpretation, { message, userId, chatId }) {
     const current = this.currentFor(chatId);
-    if (interpretation.intent === 'STATUS') return this.statusResult();
-    if (interpretation.intent === 'ANALYTICS') return { type: 'analytics', items: this.store.listContent(10), text: 'بجهز لك ملخص الأداء من البيانات المتاحة.' };
+    if (['ACTIVE_STATUS', 'PIPELINE_STATUS'].includes(interpretation.intent)) return this.activeStatusResult(chatId);
+    if (interpretation.intent === 'CONTENT_HISTORY') return this.historyResult();
+    if (['ACCOUNT_STATS', 'ANALYTICS'].includes(interpretation.intent)) return this.analyticsResult();
     if (interpretation.intent === 'SHOW_IDEAS') { const ideas = this.ideasFor(chatId); return { type: 'ideas', ideas, text: `عندي هالمسارات للبحث اليوم:\n${ideas.map((idea, index) => `${index + 1}. ${idea.title}`).join('\n')}\nإذا تبي، اختار واحد أو خلني أختار الأنسب.` }; }
     if (interpretation.intent === 'START_NEW_CONTENT') {
-      const ideas = this.ideasFor(chatId); const selected = ideas[0]; this.store.queueJob('DISCOVER_IDEAS', { requestedBy: 'telegram-semantic', selectedIdea: selected, date: new Date().toISOString().slice(0, 10) }, isoNow(), `telegram-discovery:${new Date().toISOString().slice(0, 10)}`);
-      return { type: 'content-started', text: `تمام، بختار الأنسب وأبدأ البحث والإنتاج. أول ما تجهز النسخة بدزها لك للمراجعة، وما راح يننشر شي بدون موافقتك.` };
+      if (!this.startContent) return { type: 'failed', text: 'ما قدرت أبدأ مهمة الإنتاج بشكل موثوق هالمرة.' };
+      const ideas = this.ideasFor(chatId); const selected = ideas[0]; const started = await this.startContent({ chatId, requestedBy: 'telegram-semantic', selectedIdea: selected, parameters: interpretation.parameters, oneTimePreferences: this.store.getConversationState(chatId).oneTimePreferences });
+      if (!started?.accepted) return { type: 'failed', text: 'ما قدرت أثبت تشغيل مهمة الإنتاج، فما راح أدّعي إنها بدأت.' };
+      return { type: 'content-started', content: started.content, job: started.job, text: `تمام، بدأت المهمة فعلياً: ${started.content.topic}. أول ما تجهز النسخة بدزها لك للمراجعة، وما راح يننشر شي بدون موافقتك.` };
     }
     if (interpretation.intent === 'SELECT_IDEA') {
       const ideas = this.ideasFor(chatId); const selectedIndex = interpretation.ideaIndex || 1; const selected = ideas[selectedIndex - 1];
       if (!selected) return { type: 'clarify', text: 'أي فكرة تقصد؟ اكتب رقمها أو اسمها.' };
-      this.store.queueJob('DISCOVER_IDEAS', { requestedBy: 'telegram-semantic', selectedIdea: selected, date: new Date().toISOString().slice(0, 10) }, isoNow(), `telegram-idea:${new Date().toISOString().slice(0, 10)}:${selectedIndex}`);
-      return { type: 'content-started', text: `تمام، باعتمد فكرة «${selected.title}» وأبدأ أجهزها.` };
+      if (!this.startContent) return { type: 'failed', text: 'ما قدرت أبدأ مهمة الإنتاج بشكل موثوق هالمرة.' };
+      const started = await this.startContent({ chatId, requestedBy: 'telegram-semantic', selectedIdea: selected, parameters: interpretation.parameters, oneTimePreferences: this.store.getConversationState(chatId).oneTimePreferences });
+      if (!started?.accepted) return { type: 'failed', text: 'ما قدرت أثبت تشغيل مهمة الإنتاج، فما راح أدّعي إنها بدأت.' };
+      return { type: 'content-started', content: started.content, job: started.job, text: `تمام، بدأت تجهيز فكرة «${started.content.topic}» فعلياً.` };
     }
     if (interpretation.intent === 'REPLACE_TOPIC') {
       if (current && ['READY_FOR_REVIEW', 'REVISION_REQUESTED'].includes(current.state)) this.store.transition(current.content_id, 'SKIPPED', 'telegram-topic-replacement');

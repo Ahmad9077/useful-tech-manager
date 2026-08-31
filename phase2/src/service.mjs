@@ -11,13 +11,14 @@ import { archiveApproved } from './archive.mjs';
 import { TikTokAdapter, OfficialTikTokSandboxClient } from './tiktok.mjs';
 import { sandboxAccessTokenProvider } from './sandbox-token.mjs';
 import { renderRequestedRevision } from './pipeline.mjs';
+import { chooseIdea } from './discovery.mjs';
 
 export class Phase2Service {
   constructor(config = loadConfig()) { assertSandboxOnly(config); this.config = config; }
   async start({ dashboard = true } = {}) {
     await mkdir(this.config.dataDir, { recursive: true, mode: 0o700 });
     this.store = new Store(path.join(this.config.dataDir, 'useful-tech-manager.sqlite'));
-    this.scheduler = new DurableScheduler(this.store); this.discovery = new DiscoveryEngine({ store: this.store }); this.scheduler.recoverExpiredLeases();
+    this.scheduler = new DurableScheduler(this.store); this.discovery = new DiscoveryEngine({ store: this.store }); this.scheduler.recoverExpiredLeases(); this.store.recoverActiveJobs();
     await this.initializeTelegram();
     if (dashboard) { this.dashboard = createDashboard(this.store, this.config); await new Promise((resolve) => this.dashboard.listen(this.config.dashboardPort, this.config.dashboardHost, resolve)); }
     return this;
@@ -37,6 +38,7 @@ export class Phase2Service {
   async handleJob(job) {
     try {
       if (job.kind === 'DISCOVER_IDEAS') { const signals = await this.discovery.discover(); this.store.audit('DISCOVERY_COMPLETED', 'scheduler', { sourceCount: signals.length }); }
+      else if (job.kind === 'RUN_CONTENT_PIPELINE') await this.runContentPipeline(job, parseJson(job.payload_json));
       else if (job.kind === 'RENDER_REVISION') { const result = await renderRequestedRevision({ store: this.store, config: this.config, contentId: parseJson(job.payload_json).contentId }); await this.sendReady(result.content, result.revision, result.output.qc.duration); }
       else if (job.kind === 'PUBLISH_APPROVED') await this.publishApproved(parseJson(job.payload_json));
       else if (job.kind === 'POLL_PUBLISH_STATUS') await this.pollPublishStatus(parseJson(job.payload_json));
@@ -44,6 +46,9 @@ export class Phase2Service {
     } catch (error) {
       const message = redact(error.message);
       const payload = parseJson(job.payload_json);
+      if (job.kind === 'RUN_CONTENT_PIPELINE' && payload.contentId) {
+        try { const item = this.store.getContent(payload.contentId); if (item && !['PUBLISHED','REJECTED','SKIPPED','FAILED'].includes(item.state)) { this.store.transition(payload.contentId, 'FAILED', 'pipeline'); this.store.updateProgress({ contentId: payload.contentId, stage: 'FAILED', workerStatus: 'FAILED', lastError: message }); } } catch { /* Keep original error. */ }
+      }
       if ((job.kind === 'PUBLISH_APPROVED' || job.kind === 'POLL_PUBLISH_STATUS') && payload.contentId && payload.revisionNumber) {
         try { this.store.markPublishStatus(payload.contentId, Number(payload.revisionNumber), { status: 'FAILED', error: message }); } catch { /* Preserve the original job failure if state changed independently. */ }
       }
@@ -52,7 +57,36 @@ export class Phase2Service {
   }
   async initializeTelegram() {
     if (this.config.telegram.token && !telegramReady(this.config)) await this.bootstrapTelegramOwner();
-    if (telegramReady(this.config) && !this.telegram) { this.telegram = new TelegramClient(this.config.telegram.token); this.control = new TelegramControl({ store: this.store, config: this.config, signingSecret: this.config.telegram.signingSecret }); }
+    if (telegramReady(this.config) && !this.telegram) { this.telegram = new TelegramClient(this.config.telegram.token); this.control = new TelegramControl({ store: this.store, config: this.config, signingSecret: this.config.telegram.signingSecret, startContent: (input) => this.startContentTask(input) }); }
+  }
+  async startContentTask({ chatId, requestedBy, selectedIdea, parameters = {}, oneTimePreferences = [] }) {
+    const existing = this.store.activeTaskForChat(chatId);
+    if (existing) return { accepted: false, reason: 'ACTIVE_TASK_EXISTS' };
+    const title = String(parameters.topic || selectedIdea?.title || 'فكرة تقنية عملية').slice(0, 160);
+    const task = this.store.createAndQueueContentTask({ chatId, topic: title, category: parameters.category || selectedIdea?.category || 'useful-app', payload: { requestedBy, selectedIdea, oneTimePreferences, date: new Date().toISOString().slice(0, 10) } });
+    const claimed = this.scheduler.claimJob(task.job.id);
+    if (!claimed) return { accepted: false, reason: 'WORKER_DID_NOT_ACCEPT' };
+    this.store.updateProgress({ contentId: task.content.content_id, stage: 'DISCOVERING_IDEAS', workerStatus: 'RUNNING', jobId: claimed.id, lastSuccessfulStep: 'Worker accepted durable job', lastError: null });
+    // The job is now durable, claimed, and running before Telegram is allowed to say it started.
+    void this.handleJob(claimed);
+    return { accepted: true, content: this.store.getContent(task.content.content_id), job: claimed };
+  }
+  async runContentPipeline(job, payload) {
+    const contentId = payload.contentId; const item = this.store.getContent(contentId); if (!item) throw new Error('Unknown content pipeline task');
+    if (Number(payload.revisionNumber) !== item.current_revision) throw new Error('Stale content pipeline revision');
+    this.store.updateProgress({ contentId, stage: 'DISCOVERING_IDEAS', workerStatus: 'RUNNING', jobId: job.id, lastSuccessfulStep: 'Worker started', lastError: null });
+    const signals = await this.discovery.discover(); this.scheduler.extendLease(job.id);
+    if (item.state === 'IDEA_DISCOVERED') this.store.transition(contentId, 'RESEARCHING', 'pipeline');
+    this.store.updateProgress({ contentId, stage: 'RESEARCHING', workerStatus: 'RUNNING', jobId: job.id, lastSuccessfulStep: 'Source discovery complete' });
+    this.discovery.recordResearch(contentId, signals);
+    const selected = payload.selectedIdea || { title: item.topic, category: item.category, usefulness: 8, freshness: 7, demonstrability: 7, gulfRelevance: 7, saveShare: 7, reliability: signals.length ? 8 : 4, feasibility: 6 };
+    const candidate = chooseIdea([{ ...selected, topic: selected.title || item.topic }], this.store.listContent(50).filter((row) => row.content_id !== contentId)) || selected;
+    this.store.db.prepare('UPDATE content_items SET topic=?,category=?,idea_score=?,updated_at=? WHERE content_id=?').run(String(candidate.title || item.topic).slice(0, 160), String(candidate.category || item.category).slice(0, 80), Number(candidate.score || 0) || null, isoNow(), contentId);
+    this.store.updateProgress({ contentId, stage: 'FACT_CHECKING', workerStatus: 'RUNNING', jobId: job.id, lastSuccessfulStep: 'Candidate selected and sources recorded' });
+    // A generic renderer has not been wired to invent claims. Stop truthfully after real discovery/fact-source capture.
+    this.store.transition(contentId, 'SCRIPTING', 'pipeline');
+    this.store.updateProgress({ contentId, stage: 'WRITING_SCRIPT', workerStatus: 'WAITING', jobId: job.id, lastSuccessfulStep: 'Research and fact-source capture complete' });
+    this.store.audit('CONTENT_PIPELINE_RESEARCH_COMPLETE', 'pipeline', { contentId, revisionNumber: item.current_revision, sourceCount: signals.length });
   }
   async sendReady(content, revision, duration) {
     const keyboard = reviewKeyboard({ store: this.store, contentId: content.content_id, revisionNumber: content.current_revision, fingerprint: this.store.revisionFingerprint(content.content_id, content.current_revision), secret: this.config.telegram.signingSecret });
