@@ -109,7 +109,7 @@ export class TelegramControl {
     if (interpretation.intent === 'START_NEW_CONTENT') {
       if (!this.startContent) return { type: 'failed', text: 'ما قدرت أبدأ مهمة الإنتاج بشكل موثوق هالمرة.' };
       const ideas = this.ideasFor(chatId); const selected = ideas[0]; const started = await this.startContent({ chatId, requestedBy: 'telegram-semantic', selectedIdea: selected, parameters: interpretation.parameters, oneTimePreferences: this.store.getConversationState(chatId).oneTimePreferences });
-      if (!started?.accepted) return { type: 'failed', text: 'ما قدرت أثبت تشغيل مهمة الإنتاج، فما راح أدّعي إنها بدأت.' };
+      if (!started?.accepted) return started?.reason === 'ACTIVE_TASK_EXISTS' ? this.activeStatusResult(chatId) : { type: 'failed', text: 'ما قدرت أثبت تشغيل مهمة الإنتاج، فما راح أدّعي إنها بدأت.' };
       return { type: 'content-started', content: started.content, job: started.job, text: `تمام، بدأت المهمة فعلياً: ${started.content.topic}. أول ما تجهز النسخة بدزها لك للمراجعة، وما راح يننشر شي بدون موافقتك.` };
     }
     if (interpretation.intent === 'SELECT_IDEA') {
@@ -117,7 +117,7 @@ export class TelegramControl {
       if (!selected) return { type: 'clarify', text: 'أي فكرة تقصد؟ اكتب رقمها أو اسمها.' };
       if (!this.startContent) return { type: 'failed', text: 'ما قدرت أبدأ مهمة الإنتاج بشكل موثوق هالمرة.' };
       const started = await this.startContent({ chatId, requestedBy: 'telegram-semantic', selectedIdea: selected, parameters: interpretation.parameters, oneTimePreferences: this.store.getConversationState(chatId).oneTimePreferences });
-      if (!started?.accepted) return { type: 'failed', text: 'ما قدرت أثبت تشغيل مهمة الإنتاج، فما راح أدّعي إنها بدأت.' };
+      if (!started?.accepted) return started?.reason === 'ACTIVE_TASK_EXISTS' ? this.activeStatusResult(chatId) : { type: 'failed', text: 'ما قدرت أثبت تشغيل مهمة الإنتاج، فما راح أدّعي إنها بدأت.' };
       return { type: 'content-started', content: started.content, job: started.job, text: `تمام، بدأت تجهيز فكرة «${started.content.topic}» فعلياً.` };
     }
     if (interpretation.intent === 'REPLACE_TOPIC') {
