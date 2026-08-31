@@ -24,7 +24,7 @@ export function verifyCallbackToken(token, secret) {
 export function classifyIntent(text) {
   const value = String(text || '').trim(); const low = value.toLowerCase();
   if (!value) return { type: 'empty' };
-  if (/^(status|today|stats|report|ideas)\b/i.test(value) || /^(الحالة|اليوم|إحصائيات|احصائيات|تقرير|أفكار|افكار)\b/.test(value)) return { type: 'status', query: low };
+  if (/^(status|today|stats|report|ideas)\b/i.test(value) || /^(الحالة|اليوم|إحصائيات|احصائيات|تقرير|أفكار|افكار)/.test(value)) return { type: 'status', query: low };
   if (/^(what performed best|what are the next ideas|show me yesterday|why did this video)/i.test(value)) return { type: 'analytics', query: value };
   if (/^(focus more|less |don.t cover|from now on|always |prefer )/i.test(value) || /^(من الآن|من الان|ركز أكثر|ركز اكثر|قلل|لا تغطي|أفضل|افضل)\b/.test(value)) return { type: 'preference', text: value };
   if (/^(skip today|skip)$/i.test(value) || /^(تخط|تخطي اليوم)$/.test(value)) return { type: 'skip' };
