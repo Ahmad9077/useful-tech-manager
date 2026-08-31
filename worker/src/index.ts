@@ -203,7 +203,8 @@ async function tikTokJson(path: string, token: string, init: RequestInit = {}): 
   if (init.body) headers.set("content-type", "application/json; charset=UTF-8");
   const response = await fetch(`${TIKTOK_API}${path}`, { ...init, headers });
   const payload = await response.json<Record<string, unknown>>().catch(() => ({}));
-  if (!response.ok || (payload.error && (payload.error as Record<string, unknown>).code !== "ok")) throw new AppError("TikTok API request could not be completed.", 502);
+  const apiError = (payload.error || {}) as Record<string, unknown>;
+  if (!response.ok || (payload.error && apiError.code !== "ok")) throw new AppError(`TikTok API request could not be completed (${String(apiError.code || response.status)}).`, 502);
   return payload;
 }
 
