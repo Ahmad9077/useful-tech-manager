@@ -211,7 +211,7 @@ async function dashboard(request: Request, env: Env): Promise<Response> {
   const active = await session(request, env);
   const token = await accessToken(env, active.open_id);
   const [profile, videos] = await Promise.all([
-    tikTokJson("/v2/user/info/?fields=open_id,display_name,avatar_url,profile_deep_link,follower_count,following_count,likes_count,video_count", token),
+    tikTokJson("/v2/user/info/?fields=open_id,display_name,avatar_url,follower_count,following_count,likes_count,video_count", token),
     tikTokJson("/v2/video/list/?fields=id,title,cover_image_url,create_time,share_url,video_description,duration,like_count,comment_count,share_count,view_count", token, { method: "POST", body: JSON.stringify({ max_count: 20 }) })
   ]);
   return json({ csrf: active.csrf_token, profile: profile.data || {}, videos: (videos.data as Record<string, unknown>)?.videos || [] });
