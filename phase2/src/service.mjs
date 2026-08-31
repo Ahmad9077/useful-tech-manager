@@ -43,7 +43,12 @@ export class Phase2Service {
     this.runningJobs.add(job.id); void this.handleJob(job).finally(() => this.runningJobs.delete(job.id));
   }
   async handleJob(job) {
-    const heartbeat = setInterval(() => this.scheduler.extendLease(job.id, this.workerId), 15_000); let next = null;
+    const stagePayload = parseJson(job.payload_json); const heartbeat = setInterval(() => {
+      this.scheduler.extendLease(job.id, this.workerId);
+      if (job.kind === 'RUN_STAGE' && stagePayload.contentId) {
+        const progress = this.store.getProgress(stagePayload.contentId); if (progress?.job_id === job.id && progress.worker_status === 'RUNNING') this.store.updateProgress({ contentId: stagePayload.contentId, stage: progress.current_stage, workerStatus: 'RUNNING', jobId: job.id, workerId: this.workerId, heartbeatAt: isoNow(), leaseExpiresAt: new Date(Date.now() + 90_000).toISOString() });
+      }
+    }, 15_000); let next = null;
     try {
       if (job.kind === 'DISCOVER_IDEAS') { const signals = await this.discovery.discover(); this.store.audit('DISCOVERY_COMPLETED', 'scheduler', { sourceCount: signals.length }); }
       else if (job.kind === 'RUN_STAGE') next = await this.runStage(job, parseJson(job.payload_json));
