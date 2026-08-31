@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { Store } from '../src/store.mjs';
-import { createCallbackToken, TelegramControl } from '../src/telegram.mjs';
+import { registerCallback, TelegramControl } from '../src/telegram.mjs';
 import { archiveApproved } from '../src/archive.mjs';
 import { inspectMp4 } from '../src/qc.mjs';
 import { createDashboard } from '../src/dashboard.mjs';
@@ -30,7 +30,7 @@ test('approval binds exact current revision and invalidates after a revision', a
   store.createRevision(contentId, 'Stronger hook'); assert.throws(() => store.assertPublishable(contentId, 1), /No exact active approval/); store.close();
 });
 test('signed Telegram button is authorized and cannot approve a changed revision', async (t) => {
-  const asset = await fixture(); t.after(() => rm(asset.dir, { recursive: true, force: true })); const store = new Store(); const contentId = ready(store, asset); const fingerprint = store.revisionFingerprint(contentId, 1); const secret = 'unit-test-secret'; const control = new TelegramControl({ store, config, signingSecret: secret }); const token = createCallbackToken({ action: 'approve', contentId, revisionNumber: 1, fingerprint, secret });
+  const asset = await fixture(); t.after(() => rm(asset.dir, { recursive: true, force: true })); const store = new Store(); const contentId = ready(store, asset); const fingerprint = store.revisionFingerprint(contentId, 1); const secret = 'unit-test-secret'; const control = new TelegramControl({ store, config, signingSecret: secret }); const token = registerCallback({ store, action: 'approve', contentId, revisionNumber: 1, fingerprint, secret }); assert.ok(Buffer.byteLength(token) <= 64);
   const unauthorized = control.handleUpdate({ update_id: 1, callback_query: { data: token, from: { id: 1 }, message: { chat: { id: 77 } } } }); assert.equal(unauthorized.ignored, 'unauthorized');
   const approved = control.handleUpdate({ update_id: 2, callback_query: { data: token, from: { id: 99 }, message: { chat: { id: 77 } } } }); assert.equal(approved.type, 'approved'); assert.throws(() => control.handleUpdate({ update_id: 3, callback_query: { data: token, from: { id: 99 }, message: { chat: { id: 77 } } } }), /already used/); store.close();
 });

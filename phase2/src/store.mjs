@@ -55,6 +55,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload_json TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('QUEUED','SENT','FAILED')), attempts INTEGER NOT NULL DEFAULT 0, run_after TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, error_code TEXT);
       CREATE TABLE IF NOT EXISTS telegram_updates(update_id INTEGER PRIMARY KEY, received_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS telegram_nonces(nonce TEXT PRIMARY KEY, action TEXT NOT NULL, expires_at TEXT NOT NULL, used_at TEXT);
+      CREATE TABLE IF NOT EXISTS telegram_callbacks(nonce TEXT PRIMARY KEY, action TEXT NOT NULL, content_id TEXT NOT NULL, revision_number INTEGER NOT NULL, revision_fingerprint TEXT NOT NULL, expires_at TEXT NOT NULL, used_at TEXT);
       CREATE TABLE IF NOT EXISTS editorial_preferences(id TEXT PRIMARY KEY, rule_text TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, source TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS analytics_snapshots(id INTEGER PRIMARY KEY, content_id TEXT REFERENCES content_items(content_id), captured_at TEXT NOT NULL, views INTEGER, likes INTEGER, shares INTEGER, comments INTEGER, followers INTEGER, raw_json TEXT NOT NULL DEFAULT '{}');
       CREATE TABLE IF NOT EXISTS archive_records(content_id TEXT PRIMARY KEY, revision_number INTEGER NOT NULL, archive_path TEXT NOT NULL UNIQUE, artifact_sha256 TEXT NOT NULL, archived_at TEXT NOT NULL, FOREIGN KEY(content_id,revision_number) REFERENCES content_revisions(content_id,revision_number));
@@ -120,7 +121,8 @@ export class Store {
   queueOutbox(kind, payload, idempotencyKey) { const now = isoNow(); this.db.prepare('INSERT OR IGNORE INTO outbox VALUES(?,?,?,?,?,?,?,?,?,?)').run(randomId(), kind, json(payload), 'QUEUED', 0, now, idempotencyKey, now, now, null); }
   listContent(limit = 50) { return this.db.prepare('SELECT * FROM content_items ORDER BY updated_at DESC LIMIT ?').all(limit); }
   isNewTelegramUpdate(updateId) { try { this.db.prepare('INSERT INTO telegram_updates VALUES(?,?)').run(updateId, isoNow()); return true; } catch { return false; } }
-  consumeTelegramNonce(nonce, action, expiresAt) { try { this.db.prepare('INSERT INTO telegram_nonces(nonce,action,expires_at,used_at) VALUES(?,?,?,?)').run(nonce, action, new Date(expiresAt).toISOString(), isoNow()); return true; } catch { return false; } }
+  issueTelegramCallback({ action, contentId, revisionNumber, fingerprint, expiresAt }) { const nonce = randomId(9); this.db.prepare('INSERT INTO telegram_callbacks VALUES(?,?,?,?,?,?,NULL)').run(nonce, action, contentId, revisionNumber, fingerprint, new Date(expiresAt).toISOString()); return nonce; }
+  consumeTelegramCallback(nonce) { return this.transaction(() => { const row = this.db.prepare('SELECT * FROM telegram_callbacks WHERE nonce=? AND used_at IS NULL AND expires_at>?').get(nonce, isoNow()); if (!row) return null; this.db.prepare('UPDATE telegram_callbacks SET used_at=? WHERE nonce=? AND used_at IS NULL').run(isoNow(), nonce); return row; }); }
   addSource(contentId, source) { this.db.prepare('INSERT OR IGNORE INTO research_sources(content_id,url,title,retrieved_at,claims_json) VALUES(?,?,?,?,?)').run(contentId, source.url, source.title, source.retrievedAt || isoNow(), json(source.claims || [])); }
   integrityCheck() { return this.db.prepare('PRAGMA integrity_check').all().map((row) => Object.values(row)[0]); }
 }
