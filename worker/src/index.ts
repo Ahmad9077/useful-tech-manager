@@ -1,3 +1,5 @@
+import { managerAppPage } from "./app-page";
+
 interface Env {
   DB: D1Database;
   TIKTOK_CLIENT_KEY: string;
@@ -16,7 +18,7 @@ interface D1PreparedStatement {
 }
 
 const TIKTOK_API = "https://open.tiktokapis.com";
-const OAUTH_SCOPES = ["user.info.basic", "user.info.stats", "video.list", "video.publish"];
+const OAUTH_SCOPES = ["user.info.basic", "user.info.stats", "video.list", "video.upload", "video.publish"];
 const MAX_VIDEO_BYTES = 64 * 1024 * 1024;
 const SESSION_SECONDS = 8 * 60 * 60;
 const OAUTH_SECONDS = 10 * 60;
@@ -27,7 +29,7 @@ export default {
       const url = new URL(request.url);
       if (request.method === "GET" && url.pathname === "/health") return json({ ok: true });
       if (request.method === "GET" && url.pathname === "/") return Response.redirect(new URL("/app", url), 302);
-      if (request.method === "GET" && url.pathname === "/app") return html(appPage());
+      if (request.method === "GET" && url.pathname === "/app") return html(managerAppPage());
       if (request.method === "GET" && url.pathname === "/auth/tiktok/start") return beginOAuth(request, env);
       if (request.method === "GET" && url.pathname === "/auth/tiktok/callback") return finishOAuth(request, env);
       if (request.method === "GET" && url.pathname === "/api/dashboard") return dashboard(request, env);
@@ -210,7 +212,7 @@ async function dashboard(request: Request, env: Env): Promise<Response> {
   const token = await accessToken(env, active.open_id);
   const [profile, videos] = await Promise.all([
     tikTokJson("/v2/user/info/?fields=open_id,display_name,avatar_url,profile_deep_link,follower_count,following_count,likes_count,video_count", token),
-    tikTokJson("/v2/video/list/?fields=id,title,cover_image_url,create_time,share_url,video_description,duration", token, { method: "POST", body: JSON.stringify({ max_count: 20 }) })
+    tikTokJson("/v2/video/list/?fields=id,title,cover_image_url,create_time,share_url,video_description,duration,like_count,comment_count,share_count,view_count", token, { method: "POST", body: JSON.stringify({ max_count: 20 }) })
   ]);
   return json({ csrf: active.csrf_token, profile: profile.data || {}, videos: (videos.data as Record<string, unknown>)?.videos || [] });
 }
@@ -233,20 +235,24 @@ async function publishVideo(request: Request, env: Env): Promise<Response> {
   const file = form.get("file");
   const caption = String(form.get("caption") || "").trim();
   const consent = String(form.get("approval") || "");
+  const mode = String(form.get("mode") || "direct");
   if (!(file instanceof File) || !file.size || file.size > MAX_VIDEO_BYTES) throw new AppError("Choose an MP4 video under 64 MB.");
   if (!isMp4(file, new Uint8Array(await file.slice(0, 16).arrayBuffer()))) throw new AppError("Choose a valid MP4 video.");
   if (caption.length > 2200) throw new AppError("Caption is too long.");
   if (consent !== "approved") throw new AppError("Creator approval is required before TikTok can receive a video.", 422);
+  if (mode !== "direct" && mode !== "inbox") throw new AppError("Choose a valid TikTok delivery option.", 422);
   const token = await accessToken(env, active.open_id);
-  const creator = await tikTokJson("/v2/post/publish/creator_info/query/", token, { method: "POST", body: "{}" });
-  const options = ((creator.data as Record<string, unknown>)?.privacy_level_options || []) as string[];
-  if (!options.includes("SELF_ONLY")) throw new AppError("TikTok did not make private posting available for this test account.", 422);
+  if (mode === "direct") {
+    const creator = await tikTokJson("/v2/post/publish/creator_info/query/", token, { method: "POST", body: "{}" });
+    const options = ((creator.data as Record<string, unknown>)?.privacy_level_options || []) as string[];
+    if (!options.includes("SELF_ONLY")) throw new AppError("TikTok did not make private posting available for this test account.", 422);
+  }
   const chunkSize = file.size < 5 * 1024 * 1024 ? file.size : 10 * 1024 * 1024;
   const totalChunks = Math.ceil(file.size / chunkSize);
-  const initialized = await tikTokJson("/v2/post/publish/video/init/", token, {
+  const initialized = await tikTokJson(mode === "direct" ? "/v2/post/publish/video/init/" : "/v2/post/publish/inbox/video/init/", token, {
     method: "POST",
     body: JSON.stringify({
-      post_info: { title: caption, privacy_level: "SELF_ONLY", disable_duet: true, disable_comment: true, disable_stitch: true, brand_content_toggle: false, brand_organic_toggle: false },
+      ...(mode === "direct" ? { post_info: { title: caption, privacy_level: "SELF_ONLY", disable_duet: true, disable_comment: true, disable_stitch: true, brand_content_toggle: false, brand_organic_toggle: false } } : {}),
       source_info: { source: "FILE_UPLOAD", video_size: file.size, chunk_size: chunkSize, total_chunk_count: totalChunks }
     })
   });
@@ -261,21 +267,21 @@ async function publishVideo(request: Request, env: Env): Promise<Response> {
     if (!(upload.status === 201 || upload.status === 206)) throw new AppError("TikTok could not receive the private test video.", 502);
   }
   const id = randomUrl(18);
-  await env.DB.prepare("INSERT INTO content_posts (id, open_id, publish_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)").bind(id, active.open_id, publishId, "PROCESSING", now(), now()).run();
-  return json({ id, status: "PROCESSING", visibility: "SELF_ONLY" });
+  await env.DB.prepare("INSERT INTO content_posts (id, open_id, publish_id, post_mode, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(id, active.open_id, publishId, mode, "PROCESSING", now(), now()).run();
+  return json({ id, status: "PROCESSING", delivery: mode === "direct" ? "SELF_ONLY" : "INBOX_DRAFT" });
 }
 
 async function postStatus(request: Request, env: Env, url: URL): Promise<Response> {
   const active = await session(request, env);
   const id = url.searchParams.get("id");
   if (!id || !/^[A-Za-z0-9_-]{12,64}$/.test(id)) throw new AppError("Unknown post.", 404);
-  const saved = await env.DB.prepare("SELECT publish_id, status FROM content_posts WHERE id = ? AND open_id = ?").bind(id, active.open_id).first<{ publish_id: string; status: string }>();
+  const saved = await env.DB.prepare("SELECT publish_id, post_mode, status FROM content_posts WHERE id = ? AND open_id = ?").bind(id, active.open_id).first<{ publish_id: string; post_mode: "direct" | "inbox"; status: string }>();
   if (!saved) throw new AppError("Unknown post.", 404);
   const payload = await tikTokJson("/v2/post/publish/status/fetch/", await accessToken(env, active.open_id), { method: "POST", body: JSON.stringify({ publish_id: saved.publish_id }) });
   const data = (payload.data || {}) as Record<string, unknown>;
   const status = String(data.status || saved.status);
   await env.DB.prepare("UPDATE content_posts SET status = ?, updated_at = ? WHERE id = ? AND open_id = ?").bind(status, now(), id, active.open_id).run();
-  return json({ status, visibility: "SELF_ONLY", fail_reason: data.fail_reason || null, publicaly_available_post_id: data.publicaly_available_post_id || null });
+  return json({ status, delivery: saved.post_mode === "direct" ? "SELF_ONLY" : "INBOX_DRAFT", fail_reason: data.fail_reason || null, publicaly_available_post_id: data.publicaly_available_post_id || null });
 }
 
 async function disconnect(request: Request, env: Env): Promise<Response> {
