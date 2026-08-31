@@ -6,6 +6,8 @@ import { isoNow, json, parseJson, randomId, secureEqual, sha256 } from './util.m
 export const STATES = Object.freeze(['IDEA_DISCOVERED', 'RESEARCHING', 'SCRIPTING', 'PRODUCING', 'QC', 'READY_FOR_REVIEW', 'REVISION_REQUESTED', 'REVISING', 'APPROVED', 'ARCHIVED', 'PUBLISHING', 'PUBLISHED', 'REJECTED', 'SKIPPED', 'FAILED']);
 export const ACTIVE_STATES = Object.freeze(['IDEA_DISCOVERED', 'RESEARCHING', 'SCRIPTING', 'PRODUCING', 'QC', 'READY_FOR_REVIEW', 'REVISION_REQUESTED', 'REVISING', 'APPROVED', 'ARCHIVED', 'PUBLISHING']);
 export const PROGRESS_STAGES = Object.freeze(['DISCOVERING_IDEAS', 'RESEARCHING', 'FACT_CHECKING', 'SELECTING_IDEA', 'WRITING_SCRIPT', 'GENERATING_VOICE', 'BUILDING_VISUALS', 'RENDERING', 'QC', 'READY_FOR_REVIEW', 'REVISION_REQUESTED', 'REVISING', 'APPROVED', 'ARCHIVED', 'PUBLISHING', 'PUBLISHED', 'FAILED', 'SANDBOX_TEST_COMPLETE']);
+export const AUTOMATED_STAGES = Object.freeze(['DISCOVERING_IDEAS', 'RESEARCHING', 'FACT_CHECKING', 'SELECTING_IDEA', 'WRITING_SCRIPT', 'GENERATING_VOICE', 'BUILDING_VISUALS', 'RENDERING', 'QC']);
+export const WAITING_REASONS = Object.freeze(['WAITING_FOR_USER_APPROVAL', 'WAITING_FOR_REVISION_INSTRUCTIONS', 'WAITING_FOR_TIKTOK_REAUTH', 'WAITING_FOR_PROVIDER_RETRY', 'WAITING_FOR_RATE_LIMIT', 'WAITING_FOR_NETWORK']);
 const canTransition = new Map([
   ['IDEA_DISCOVERED', new Set(['RESEARCHING', 'SKIPPED', 'FAILED'])],
   ['RESEARCHING', new Set(['SCRIPTING', 'SKIPPED', 'FAILED'])],
@@ -88,6 +90,11 @@ export class Store {
     `);
     // Safe additive migrations for databases created before conversational progress existed.
     try { this.db.exec('ALTER TABLE telegram_conversation_state ADD COLUMN last_bot_action TEXT'); } catch { /* already present */ }
+    for (const [table, column, type] of [
+      ['workflow_jobs', 'worker_id', 'TEXT'], ['workflow_jobs', 'claimed_at', 'TEXT'], ['workflow_jobs', 'heartbeat_at', 'TEXT'],
+      ['content_progress', 'worker_id', 'TEXT'], ['content_progress', 'claimed_at', 'TEXT'], ['content_progress', 'heartbeat_at', 'TEXT'], ['content_progress', 'lease_expires_at', 'TEXT'],
+      ['content_progress', 'waiting_reason', 'TEXT'], ['content_progress', 'waiting_since', 'TEXT'], ['content_progress', 'next_retry_at', 'TEXT'], ['content_progress', 'attempt_count', 'INTEGER NOT NULL DEFAULT 0'],
+    ]) { try { this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`); } catch { /* already present */ } }
     const now = isoNow();
     this.db.prepare("INSERT OR IGNORE INTO content_progress(content_id,current_stage,worker_status,job_id,started_at,updated_at,last_successful_step,last_error) SELECT content_id,CASE WHEN state='PUBLISHED' THEN 'PUBLISHED' WHEN state='READY_FOR_REVIEW' THEN 'READY_FOR_REVIEW' WHEN state='FAILED' THEN 'FAILED' ELSE state END,CASE WHEN state IN ('PUBLISHED','REJECTED','SKIPPED','FAILED') THEN 'COMPLETE' ELSE 'IDLE' END,NULL,created_at,updated_at,NULL,NULL FROM content_items").run();
     this.db.prepare("INSERT OR IGNORE INTO content_publication_classification(content_id,environment,visibility,updated_at) SELECT content_id,'none','NOT_PUBLISHED',updated_at FROM content_items").run();
@@ -102,7 +109,7 @@ export class Store {
       const now = isoNow(); const id = contentId || `UT-${now.slice(0, 10).replaceAll('-', '')}-${randomId(4).toUpperCase()}`;
       this.db.prepare('INSERT INTO content_items VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(id, topic, category, 'IDEA_DISCOVERED', 1, ideaScore, hook, hookType, now, now, null, null);
       this.db.prepare('INSERT INTO content_revisions(content_id,revision_number,created_at) VALUES(?,?,?)').run(id, 1, now);
-      this.db.prepare('INSERT INTO content_progress VALUES(?,?,?,?,?,?,?,?)').run(id, 'DISCOVERING_IDEAS', 'QUEUED', null, now, now, null, null);
+      this.db.prepare('INSERT INTO content_progress(content_id,current_stage,worker_status,job_id,started_at,updated_at,last_successful_step,last_error) VALUES(?,?,?,?,?,?,?,?)').run(id, 'DISCOVERING_IDEAS', 'QUEUED', null, now, now, null, null);
       this.db.prepare('INSERT INTO content_publication_classification VALUES(?,?,?,?)').run(id, 'none', 'NOT_PUBLISHED', now);
       this.audit('CONTENT_CREATED', 'system', { contentId: id, revisionNumber: 1 }); return this.getContent(id);
     });
@@ -112,7 +119,7 @@ export class Store {
       const now = isoNow(); const contentId = `UT-${now.slice(0, 10).replaceAll('-', '')}-${randomId(4).toUpperCase()}`;
       this.db.prepare('INSERT INTO content_items VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(contentId, topic, category, 'IDEA_DISCOVERED', 1, ideaScore, hook, hookType, now, now, null, null);
       this.db.prepare('INSERT INTO content_revisions(content_id,revision_number,created_at) VALUES(?,?,?)').run(contentId, 1, now);
-      this.db.prepare('INSERT INTO content_progress VALUES(?,?,?,?,?,?,?,?)').run(contentId, 'DISCOVERING_IDEAS', 'QUEUED', null, now, now, null, null);
+      this.db.prepare('INSERT INTO content_progress(content_id,current_stage,worker_status,job_id,started_at,updated_at,last_successful_step,last_error) VALUES(?,?,?,?,?,?,?,?)').run(contentId, 'DISCOVERING_IDEAS', 'QUEUED', null, now, now, null, null);
       this.db.prepare('INSERT INTO content_publication_classification VALUES(?,?,?,?)').run(contentId, 'none', 'NOT_PUBLISHED', now);
       const job = this.queueJob('RUN_CONTENT_PIPELINE', { contentId, revisionNumber: 1, ...payload }, now, `content-pipeline:${contentId}:r1`);
       if (!job.inserted || !job.job) throw new Error('Durable production job was not created');
@@ -125,11 +132,14 @@ export class Store {
   }
   getContent(contentId) { const row = this.db.prepare('SELECT * FROM content_items WHERE content_id=?').get(contentId); return row && { ...row, current_revision: Number(row.current_revision) }; }
   getProgress(contentId) { return this.db.prepare('SELECT * FROM content_progress WHERE content_id=?').get(contentId) || null; }
-  updateProgress({ contentId, stage, workerStatus, jobId = undefined, lastSuccessfulStep = undefined, lastError = undefined }) {
+  updateProgress({ contentId, stage, workerStatus, jobId = undefined, lastSuccessfulStep = undefined, lastError = undefined, workerId = undefined, claimedAt = undefined, heartbeatAt = undefined, leaseExpiresAt = undefined, waitingReason = undefined, waitingSince = undefined, nextRetryAt = undefined, attemptCount = undefined }) {
     if (!PROGRESS_STAGES.includes(stage)) throw new Error('Invalid content progress stage');
     if (!['QUEUED','RUNNING','WAITING','IDLE','FAILED','COMPLETE'].includes(workerStatus)) throw new Error('Invalid worker status');
     const current = this.getProgress(contentId); if (!current) throw new Error('Unknown content progress'); const now = isoNow();
-    this.db.prepare('UPDATE content_progress SET current_stage=?,worker_status=?,job_id=?,updated_at=?,last_successful_step=?,last_error=? WHERE content_id=?').run(stage, workerStatus, jobId === undefined ? current.job_id : jobId, now, lastSuccessfulStep === undefined ? current.last_successful_step : lastSuccessfulStep, lastError === undefined ? current.last_error : (lastError ? String(lastError).slice(0, 240) : null), contentId);
+    const resolvedReason = waitingReason === undefined ? current.waiting_reason : waitingReason;
+    if (workerStatus === 'WAITING' && !WAITING_REASONS.includes(resolvedReason)) throw new Error('WAITING requires a valid waiting reason');
+    if (workerStatus === 'WAITING' && AUTOMATED_STAGES.includes(stage) && resolvedReason !== 'WAITING_FOR_PROVIDER_RETRY' && resolvedReason !== 'WAITING_FOR_RATE_LIMIT' && resolvedReason !== 'WAITING_FOR_NETWORK') throw new Error('Automated stages cannot wait without an explicit retry reason');
+    this.db.prepare('UPDATE content_progress SET current_stage=?,worker_status=?,job_id=?,updated_at=?,last_successful_step=?,last_error=?,worker_id=?,claimed_at=?,heartbeat_at=?,lease_expires_at=?,waiting_reason=?,waiting_since=?,next_retry_at=?,attempt_count=? WHERE content_id=?').run(stage, workerStatus, jobId === undefined ? current.job_id : jobId, now, lastSuccessfulStep === undefined ? current.last_successful_step : lastSuccessfulStep, lastError === undefined ? current.last_error : (lastError ? String(lastError).slice(0, 240) : null), workerId === undefined ? current.worker_id : workerId, claimedAt === undefined ? current.claimed_at : claimedAt, heartbeatAt === undefined ? current.heartbeat_at : heartbeatAt, leaseExpiresAt === undefined ? current.lease_expires_at : leaseExpiresAt, resolvedReason || null, waitingSince === undefined ? (workerStatus === 'WAITING' ? current.waiting_since || now : null) : waitingSince, nextRetryAt === undefined ? current.next_retry_at : nextRetryAt, attemptCount === undefined ? Number(current.attempt_count || 0) : Number(attemptCount), contentId);
     return this.getProgress(contentId);
   }
   activeTaskForChat(chatId) {
@@ -207,7 +217,7 @@ export class Store {
   }
   queueJob(kind, payload, runAfter = isoNow(), idempotencyKey = `${kind}:${randomId()}`) {
     const now = isoNow(); const id = randomId();
-    const result = this.db.prepare('INSERT OR IGNORE INTO workflow_jobs VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(id, kind, json(payload), 'QUEUED', runAfter, null, 0, idempotencyKey, now, now, null);
+    const result = this.db.prepare('INSERT OR IGNORE INTO workflow_jobs(id,kind,payload_json,status,run_after,lease_until,attempts,idempotency_key,created_at,updated_at,error_code) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(id, kind, json(payload), 'QUEUED', runAfter, null, 0, idempotencyKey, now, now, null);
     const job = result.changes ? this.db.prepare('SELECT * FROM workflow_jobs WHERE id=?').get(id) : this.db.prepare('SELECT * FROM workflow_jobs WHERE idempotency_key=?').get(idempotencyKey);
     return { inserted: Boolean(result.changes), job };
   }
@@ -270,7 +280,8 @@ export class Store {
     const recovered = [];
     for (const row of rows) {
       const job = row.job_id && this.db.prepare('SELECT * FROM workflow_jobs WHERE id=?').get(row.job_id);
-      if (job?.status === 'QUEUED') { this.updateProgress({ contentId: row.content_id, stage: row.current_stage, workerStatus: 'QUEUED', jobId: job.id, lastError: null }); recovered.push(row.content_id); continue; }
+      if (row.worker_status === 'WAITING' && !row.waiting_reason && AUTOMATED_STAGES.includes(row.current_stage)) { this.updateProgress({ contentId: row.content_id, stage: row.current_stage, workerStatus: 'QUEUED', jobId: null, waitingReason: null, waitingSince: null, lastError: 'Repaired invalid bare WAITING state' }); recovered.push(row.content_id); continue; }
+      if (job?.status === 'QUEUED') { this.updateProgress({ contentId: row.content_id, stage: row.current_stage, workerStatus: 'QUEUED', jobId: job.id, lastError: null, waitingReason: null, waitingSince: null }); recovered.push(row.content_id); continue; }
       if (job?.status === 'CLAIMED') continue;
       if (row.worker_status === 'RUNNING' || row.worker_status === 'QUEUED') {
         const queued = this.queueJob('RUN_CONTENT_PIPELINE', { contentId: row.content_id, revisionNumber: this.getContent(row.content_id).current_revision }, isoNow(), `content-pipeline:${row.content_id}:r${this.getContent(row.content_id).current_revision}`);
@@ -279,6 +290,11 @@ export class Store {
       }
     }
     return recovered;
+  }
+  findActiveStageJob(contentId, revisionNumber, stage) { return this.db.prepare("SELECT * FROM workflow_jobs WHERE kind='RUN_STAGE' AND status IN ('QUEUED','CLAIMED') AND json_extract(payload_json,'$.contentId')=? AND json_extract(payload_json,'$.revisionNumber')=? AND json_extract(payload_json,'$.stage')=? ORDER BY created_at DESC LIMIT 1").get(contentId, Number(revisionNumber), stage) || null; }
+  queueStageIfAbsent({ contentId, revisionNumber, stage, runAfter = isoNow(), attempt = 0 }) {
+    const existing = this.findActiveStageJob(contentId, revisionNumber, stage); if (existing) return { inserted: false, job: existing };
+    return this.queueJob('RUN_STAGE', { contentId, revisionNumber: Number(revisionNumber), stage }, runAfter, `stage:${contentId}:r${revisionNumber}:${stage}:${attempt}:${randomId(4)}`);
   }
   isNewTelegramUpdate(updateId) { try { this.db.prepare('INSERT INTO telegram_updates VALUES(?,?)').run(updateId, isoNow()); return true; } catch { return false; } }
   issueTelegramCallback({ action, contentId, revisionNumber, fingerprint, expiresAt }) { const nonce = randomId(9); this.db.prepare('INSERT INTO telegram_callbacks VALUES(?,?,?,?,?,?,NULL)').run(nonce, action, contentId, revisionNumber, fingerprint, new Date(expiresAt).toISOString()); return nonce; }

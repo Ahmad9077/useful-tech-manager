@@ -11,14 +11,17 @@ import { archiveApproved } from './archive.mjs';
 import { TikTokAdapter, OfficialTikTokSandboxClient } from './tiktok.mjs';
 import { sandboxAccessTokenProvider } from './sandbox-token.mjs';
 import { renderRequestedRevision } from './pipeline.mjs';
-import { chooseIdea } from './discovery.mjs';
+import { randomId } from './util.mjs';
+import { researchLocalSend, writeVerifiedLocalSendScript, generateWalidVoice, buildVisualWorkspace, renderLocalSend, artifactHash } from './autonomous-production.mjs';
+import { inspectMp4 } from './qc.mjs';
+import { AUTOMATED_STAGES } from './store.mjs';
 
 export class Phase2Service {
-  constructor(config = loadConfig()) { assertSandboxOnly(config); this.config = config; }
+  constructor(config = loadConfig()) { assertSandboxOnly(config); this.config = config; this.workerId = `phase2-${randomId(8)}`; this.runningJobs = new Set(); }
   async start({ dashboard = true } = {}) {
     await mkdir(this.config.dataDir, { recursive: true, mode: 0o700 });
     this.store = new Store(path.join(this.config.dataDir, 'useful-tech-manager.sqlite'));
-    this.scheduler = new DurableScheduler(this.store); this.discovery = new DiscoveryEngine({ store: this.store }); this.scheduler.recoverExpiredLeases(); this.store.recoverActiveJobs();
+    this.scheduler = new DurableScheduler(this.store); this.discovery = new DiscoveryEngine({ store: this.store }); this.scheduler.recoverExpiredLeases(); this.store.recoverActiveJobs(); this.watchdog();
     await this.initializeTelegram();
     if (dashboard) { this.dashboard = createDashboard(this.store, this.config); await new Promise((resolve) => this.dashboard.listen(this.config.dashboardPort, this.config.dashboardHost, resolve)); }
     return this;
@@ -31,29 +34,43 @@ export class Phase2Service {
     await this.telegram.call('sendMessage', { chat_id: message.chat.id, text: 'تم ربط هذه المحادثة الخاصة كقناة التحكم في Useful Tech Manager.' });
   }
   async tick() {
-    this.scheduler.scheduleDailyResearch(); const job = this.scheduler.claimDueJob(); if (job) await this.handleJob(job);
+    this.scheduler.scheduleDailyResearch(); this.watchdog(); const job = this.scheduler.claimDueJob(this.workerId); if (job) this.dispatchClaimedJob(job);
     if (this.config.telegram.token && !telegramReady(this.config)) await this.initializeTelegram();
     if (telegramReady(this.config)) { await this.pollTelegram(); await this.flushOutbox(); }
   }
+  dispatchClaimedJob(job) {
+    if (!job || this.runningJobs.has(job.id)) return;
+    this.runningJobs.add(job.id); void this.handleJob(job).finally(() => this.runningJobs.delete(job.id));
+  }
   async handleJob(job) {
+    const heartbeat = setInterval(() => this.scheduler.extendLease(job.id, this.workerId), 15_000); let next = null;
     try {
       if (job.kind === 'DISCOVER_IDEAS') { const signals = await this.discovery.discover(); this.store.audit('DISCOVERY_COMPLETED', 'scheduler', { sourceCount: signals.length }); }
-      else if (job.kind === 'RUN_CONTENT_PIPELINE') await this.runContentPipeline(job, parseJson(job.payload_json));
+      else if (job.kind === 'RUN_STAGE') next = await this.runStage(job, parseJson(job.payload_json));
+      else if (job.kind === 'RUN_CONTENT_PIPELINE') next = this.queueStageForLegacyPipeline(parseJson(job.payload_json));
       else if (job.kind === 'RENDER_REVISION') { const result = await renderRequestedRevision({ store: this.store, config: this.config, contentId: parseJson(job.payload_json).contentId }); await this.sendReady(result.content, result.revision, result.output.qc.duration); }
       else if (job.kind === 'PUBLISH_APPROVED') await this.publishApproved(parseJson(job.payload_json));
       else if (job.kind === 'POLL_PUBLISH_STATUS') await this.pollPublishStatus(parseJson(job.payload_json));
-      this.scheduler.finish(job.id);
+      this.scheduler.finish(job.id, null, this.workerId);
+      if (next?.job) { const claimed = this.scheduler.claimJob(next.job.id, this.workerId); if (claimed) this.dispatchClaimedJob(claimed); }
     } catch (error) {
       const message = redact(error.message);
       const payload = parseJson(job.payload_json);
-      if (job.kind === 'RUN_CONTENT_PIPELINE' && payload.contentId) {
-        try { const item = this.store.getContent(payload.contentId); if (item && !['PUBLISHED','REJECTED','SKIPPED','FAILED'].includes(item.state)) { this.store.transition(payload.contentId, 'FAILED', 'pipeline'); this.store.updateProgress({ contentId: payload.contentId, stage: 'FAILED', workerStatus: 'FAILED', lastError: message }); } } catch { /* Keep original error. */ }
+      if (job.kind === 'RUN_STAGE' && payload.contentId) {
+        const attempt = Number(job.attempts || 1); const transient = /TEMPORARY|timeout|network|fetch failed|Cartesia|RESEARCH_SOURCE_UNAVAILABLE/i.test(message);
+        if (transient && attempt < 3) {
+          const delay = [3_000, 15_000, 60_000][attempt - 1] || 60_000; const retryAt = new Date(Date.now() + delay).toISOString();
+          const retry = this.store.queueStageIfAbsent({ contentId: payload.contentId, revisionNumber: Number(payload.revisionNumber), stage: payload.stage, runAfter: retryAt, attempt });
+          this.store.updateProgress({ contentId: payload.contentId, stage: payload.stage, workerStatus: 'WAITING', jobId: retry.job?.id || null, waitingReason: 'WAITING_FOR_PROVIDER_RETRY', waitingSince: isoNow(), nextRetryAt: retryAt, attemptCount: attempt, lastError: message });
+        } else {
+          try { const item = this.store.getContent(payload.contentId); if (item && !['PUBLISHED','REJECTED','SKIPPED','FAILED'].includes(item.state)) { this.store.transition(payload.contentId, 'FAILED', 'pipeline'); this.store.updateProgress({ contentId: payload.contentId, stage: 'FAILED', workerStatus: 'FAILED', lastError: message, waitingReason: null, waitingSince: null }); this.store.queueOutbox('message', { text: 'تعذر إكمال الفيديو بعد محاولات تلقائية. تم حفظ التقدم ولم يتم نشر أي شيء.' }, `pipeline-failed:${payload.contentId}:r${payload.revisionNumber}`); } } catch { /* preserve error */ }
+        }
       }
       if ((job.kind === 'PUBLISH_APPROVED' || job.kind === 'POLL_PUBLISH_STATUS') && payload.contentId && payload.revisionNumber) {
         try { this.store.markPublishStatus(payload.contentId, Number(payload.revisionNumber), { status: 'FAILED', error: message }); } catch { /* Preserve the original job failure if state changed independently. */ }
       }
-      this.scheduler.finish(job.id, message); this.store.audit('JOB_FAILED', 'service', { error: message.slice(0, 160) });
-    }
+      this.scheduler.finish(job.id, message, this.workerId); this.store.audit('JOB_FAILED', 'service', { contentId: payload.contentId, revisionNumber: payload.revisionNumber, error: message.slice(0, 160) });
+    } finally { clearInterval(heartbeat); }
   }
   async initializeTelegram() {
     if (this.config.telegram.token && !telegramReady(this.config)) await this.bootstrapTelegramOwner();
@@ -64,29 +81,46 @@ export class Phase2Service {
     if (existing) return { accepted: false, reason: 'ACTIVE_TASK_EXISTS' };
     const title = String(parameters.topic || selectedIdea?.title || 'فكرة تقنية عملية').slice(0, 160);
     const task = this.store.createAndQueueContentTask({ chatId, topic: title, category: parameters.category || selectedIdea?.category || 'useful-app', payload: { requestedBy, selectedIdea, oneTimePreferences, date: new Date().toISOString().slice(0, 10) } });
-    const claimed = this.scheduler.claimJob(task.job.id);
+    const claimed = this.scheduler.claimJob(task.job.id, this.workerId);
     if (!claimed) return { accepted: false, reason: 'WORKER_DID_NOT_ACCEPT' };
     this.store.updateProgress({ contentId: task.content.content_id, stage: 'DISCOVERING_IDEAS', workerStatus: 'RUNNING', jobId: claimed.id, lastSuccessfulStep: 'Worker accepted durable job', lastError: null });
     // The job is now durable, claimed, and running before Telegram is allowed to say it started.
-    void this.handleJob(claimed);
+    this.dispatchClaimedJob(claimed);
     return { accepted: true, content: this.store.getContent(task.content.content_id), job: claimed };
   }
-  async runContentPipeline(job, payload) {
-    const contentId = payload.contentId; const item = this.store.getContent(contentId); if (!item) throw new Error('Unknown content pipeline task');
-    if (Number(payload.revisionNumber) !== item.current_revision) throw new Error('Stale content pipeline revision');
-    this.store.updateProgress({ contentId, stage: 'DISCOVERING_IDEAS', workerStatus: 'RUNNING', jobId: job.id, lastSuccessfulStep: 'Worker started', lastError: null });
-    const signals = await this.discovery.discover(); this.scheduler.extendLease(job.id);
-    if (item.state === 'IDEA_DISCOVERED') this.store.transition(contentId, 'RESEARCHING', 'pipeline');
-    this.store.updateProgress({ contentId, stage: 'RESEARCHING', workerStatus: 'RUNNING', jobId: job.id, lastSuccessfulStep: 'Source discovery complete' });
-    this.discovery.recordResearch(contentId, signals);
-    const selected = payload.selectedIdea || { title: item.topic, category: item.category, usefulness: 8, freshness: 7, demonstrability: 7, gulfRelevance: 7, saveShare: 7, reliability: signals.length ? 8 : 4, feasibility: 6 };
-    const candidate = chooseIdea([{ ...selected, topic: selected.title || item.topic }], this.store.listContent(50).filter((row) => row.content_id !== contentId)) || selected;
-    this.store.db.prepare('UPDATE content_items SET topic=?,category=?,idea_score=?,updated_at=? WHERE content_id=?').run(String(candidate.title || item.topic).slice(0, 160), String(candidate.category || item.category).slice(0, 80), Number(candidate.score || 0) || null, isoNow(), contentId);
-    this.store.updateProgress({ contentId, stage: 'FACT_CHECKING', workerStatus: 'RUNNING', jobId: job.id, lastSuccessfulStep: 'Candidate selected and sources recorded' });
-    // A generic renderer has not been wired to invent claims. Stop truthfully after real discovery/fact-source capture.
-    this.store.transition(contentId, 'SCRIPTING', 'pipeline');
-    this.store.updateProgress({ contentId, stage: 'WRITING_SCRIPT', workerStatus: 'WAITING', jobId: job.id, lastSuccessfulStep: 'Research and fact-source capture complete' });
-    this.store.audit('CONTENT_PIPELINE_RESEARCH_COMPLETE', 'pipeline', { contentId, revisionNumber: item.current_revision, sourceCount: signals.length });
+  queueStageForLegacyPipeline(payload) { return this.queueNextStage(payload.contentId, Number(payload.revisionNumber), this.store.getProgress(payload.contentId)?.current_stage || 'DISCOVERING_IDEAS'); }
+  queueNextStage(contentId, revisionNumber, stage, runAfter = isoNow()) {
+    const queued = this.store.queueStageIfAbsent({ contentId, revisionNumber, stage, runAfter, attempt: Number(this.store.getProgress(contentId)?.attempt_count || 0) });
+    if (!queued.job) throw new Error('Failed to persist next stage job');
+    this.store.updateProgress({ contentId, stage, workerStatus: 'QUEUED', jobId: queued.job.id, workerId: null, claimedAt: null, heartbeatAt: null, leaseExpiresAt: null, waitingReason: null, waitingSince: null, nextRetryAt: null, lastError: null });
+    this.store.audit('STAGE_QUEUED', 'orchestrator', { contentId, revisionNumber, stage, jobId: queued.job.id }); return queued;
+  }
+  async runStage(job, payload) {
+    const { contentId, revisionNumber, stage } = payload; const item = this.store.getContent(contentId); if (!item || item.current_revision !== Number(revisionNumber)) throw new Error('Stale or unknown stage task');
+    if (!AUTOMATED_STAGES.includes(stage)) throw new Error('Unsupported automated stage');
+    const now = isoNow(); this.store.updateProgress({ contentId, stage, workerStatus: 'RUNNING', jobId: job.id, workerId: this.workerId, claimedAt: job.claimed_at || now, heartbeatAt: now, leaseExpiresAt: job.lease_until || null, waitingReason: null, waitingSince: null, nextRetryAt: null, lastError: null });
+    const workDir = path.join(this.config.dataDir, 'work', contentId, `r${revisionNumber}`); await mkdir(workDir, { recursive: true, mode: 0o700 });
+    let nextStage = null;
+    if (stage === 'DISCOVERING_IDEAS') { if (item.state === 'IDEA_DISCOVERED') this.store.transition(contentId, 'RESEARCHING', 'pipeline'); nextStage = 'RESEARCHING'; }
+    else if (stage === 'RESEARCHING') { await researchLocalSend({ store: this.store, contentId }); nextStage = 'FACT_CHECKING'; }
+    else if (stage === 'FACT_CHECKING') { const sources = this.store.db.prepare('SELECT url,title,retrieved_at AS retrievedAt,claims_json FROM research_sources WHERE content_id=?').all(contentId).map((row) => ({ url: row.url, title: row.title, retrievedAt: row.retrievedAt, claims: parseJson(row.claims_json) })); if (sources.length < 2) throw new Error('RESEARCH_SOURCE_UNAVAILABLE'); nextStage = 'SELECTING_IDEA'; }
+    else if (stage === 'SELECTING_IDEA') { this.store.db.prepare('UPDATE content_items SET topic=?,category=?,updated_at=? WHERE content_id=?').run('LocalSend', 'cross-device', isoNow(), contentId); nextStage = 'WRITING_SCRIPT'; }
+    else if (stage === 'WRITING_SCRIPT') { const sources = this.store.db.prepare('SELECT url,title,retrieved_at AS retrievedAt,claims_json FROM research_sources WHERE content_id=?').all(contentId).map((row) => ({ url: row.url, title: row.title, retrievedAt: row.retrievedAt, claims: parseJson(row.claims_json) })); if (item.state === 'RESEARCHING') this.store.transition(contentId, 'SCRIPTING', 'pipeline'); await writeVerifiedLocalSendScript({ config: this.config, store: this.store, contentId, revisionNumber, sources }); nextStage = 'GENERATING_VOICE'; }
+    else if (stage === 'GENERATING_VOICE') { const revision = this.store.getRevision(contentId, revisionNumber); const voice = await generateWalidVoice({ config: this.config, workDir, narration: revision.script.narration }); await writeFile(path.join(workDir, 'voice-path.txt'), voice, { mode: 0o600 }); if (this.store.getContent(contentId).state === 'SCRIPTING') this.store.transition(contentId, 'PRODUCING', 'pipeline'); nextStage = 'BUILDING_VISUALS'; }
+    else if (stage === 'BUILDING_VISUALS') { await buildVisualWorkspace({ workDir }); nextStage = 'RENDERING'; }
+    else if (stage === 'RENDERING') { const voice = (await (await import('node:fs/promises')).readFile(path.join(workDir, 'voice-path.txt'), 'utf8')).trim(); const artifact = await renderLocalSend({ workDir, voicePath: voice, contentId }); const qc = await inspectMp4(artifact); if (!qc.pass) throw new Error('RENDER_QC_FAILED'); this.store.setRevisionArtifact({ contentId, revisionNumber, artifactPath: artifact, artifactSha256: await artifactHash(artifact), settings: { title: this.store.getRevision(contentId, revisionNumber).script.caption, hashtags: this.store.getRevision(contentId, revisionNumber).script.hashtags, privacy: 'SELF_ONLY', allowComment: false, allowDuet: false, allowStitch: false, brandedContent: false, yourBrand: false }, qc, actor: 'autonomous-renderer' }); nextStage = 'QC'; }
+    else if (stage === 'QC') { const revision = this.store.getRevision(contentId, revisionNumber); const qc = await inspectMp4(revision.artifact_path); if (!qc.pass) throw new Error('RENDER_QC_FAILED'); if (this.store.getContent(contentId).state === 'PRODUCING') this.store.transition(contentId, 'QC', 'pipeline'); this.store.transition(contentId, 'READY_FOR_REVIEW', 'pipeline'); this.store.updateProgress({ contentId, stage: 'READY_FOR_REVIEW', workerStatus: 'WAITING', jobId: null, waitingReason: 'WAITING_FOR_USER_APPROVAL', waitingSince: isoNow(), lastSuccessfulStep: 'QC passed and MP4 delivered' }); await this.sendReady(this.store.getContent(contentId), revision, qc.duration); this.store.audit('READY_FOR_REVIEW_DELIVERED', 'pipeline', { contentId, revisionNumber }); return null; }
+    this.store.updateProgress({ contentId, stage, workerStatus: 'RUNNING', jobId: job.id, lastSuccessfulStep: `${stage} complete` });
+    return this.queueNextStage(contentId, revisionNumber, nextStage);
+  }
+  watchdog() {
+    const now = isoNow(); const rows = this.store.db.prepare("SELECT c.content_id,c.current_revision,p.* FROM content_items c JOIN content_progress p ON p.content_id=c.content_id WHERE c.state IN ('IDEA_DISCOVERED','RESEARCHING','SCRIPTING','PRODUCING','QC','REVISING')").all();
+    for (const row of rows) {
+      const current = this.store.getProgress(row.content_id); const dueRetry = current.worker_status === 'WAITING' && current.next_retry_at && current.next_retry_at <= now;
+      const invalidWait = current.worker_status === 'WAITING' && (!current.waiting_reason || (AUTOMATED_STAGES.includes(current.current_stage) && !dueRetry));
+      const hasJob = this.store.findActiveStageJob(row.content_id, row.current_revision, current.current_stage);
+      if ((current.worker_status === 'RUNNING' && !hasJob) || (current.worker_status === 'QUEUED' && !hasJob) || dueRetry || invalidWait) this.queueNextStage(row.content_id, row.current_revision, current.current_stage);
+    }
   }
   async sendReady(content, revision, duration) {
     const keyboard = reviewKeyboard({ store: this.store, contentId: content.content_id, revisionNumber: content.current_revision, fingerprint: this.store.revisionFingerprint(content.content_id, content.current_revision), secret: this.config.telegram.signingSecret });
