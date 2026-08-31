@@ -2,3 +2,5 @@
 .playwright-cli/
 .wrangler/
 worker/test-assets/
+review-recording/
+TikTok_App_Review_Demo.mp4
