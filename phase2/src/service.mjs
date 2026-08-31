@@ -41,7 +41,14 @@ export class Phase2Service {
       else if (job.kind === 'PUBLISH_APPROVED') await this.publishApproved(parseJson(job.payload_json));
       else if (job.kind === 'POLL_PUBLISH_STATUS') await this.pollPublishStatus(parseJson(job.payload_json));
       this.scheduler.finish(job.id);
-    } catch (error) { this.scheduler.finish(job.id, redact(error.message)); this.store.audit('JOB_FAILED', 'service', { error: redact(error.message).slice(0, 160) }); }
+    } catch (error) {
+      const message = redact(error.message);
+      const payload = parseJson(job.payload_json);
+      if ((job.kind === 'PUBLISH_APPROVED' || job.kind === 'POLL_PUBLISH_STATUS') && payload.contentId && payload.revisionNumber) {
+        try { this.store.markPublishStatus(payload.contentId, Number(payload.revisionNumber), { status: 'FAILED', error: message }); } catch { /* Preserve the original job failure if state changed independently. */ }
+      }
+      this.scheduler.finish(job.id, message); this.store.audit('JOB_FAILED', 'service', { error: message.slice(0, 160) });
+    }
   }
   async initializeTelegram() {
     if (this.config.telegram.token && !telegramReady(this.config)) await this.bootstrapTelegramOwner();
