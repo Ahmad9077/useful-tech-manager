@@ -37,6 +37,7 @@ export default {
       if (request.method === "POST" && url.pathname === "/api/creator-info") return creatorInfo(request, env);
       if (request.method === "POST" && url.pathname === "/api/publish") return publishVideo(request, env);
       if (request.method === "GET" && url.pathname === "/api/publish/status") return postStatus(request, env, url);
+      if (request.method === "GET" && url.pathname === "/api/publish/latest") return latestPostStatus(request, env);
       if (request.method === "POST" && url.pathname === "/api/disconnect") return disconnect(request, env);
       return json({ error: "Not found" }, 404);
     } catch (error) {
@@ -292,11 +293,22 @@ async function postStatus(request: Request, env: Env, url: URL): Promise<Respons
   if (!id || !/^[A-Za-z0-9_-]{12,64}$/.test(id)) throw new AppError("Unknown post.", 404);
   const saved = await env.DB.prepare("SELECT publish_id, post_mode, status FROM content_posts WHERE id = ? AND open_id = ?").bind(id, active.open_id).first<{ publish_id: string; post_mode: "direct" | "inbox"; status: string }>();
   if (!saved) throw new AppError("Unknown post.", 404);
-  const payload = await tikTokJson("/v2/post/publish/status/fetch/", await accessToken(env, active.open_id), { method: "POST", body: JSON.stringify({ publish_id: saved.publish_id }) });
+  return json(await refreshPostStatus(env, active.open_id, id, saved));
+}
+
+async function latestPostStatus(request: Request, env: Env): Promise<Response> {
+  const active = await session(request, env);
+  const saved = await env.DB.prepare("SELECT id, publish_id, post_mode, status FROM content_posts WHERE open_id = ? ORDER BY updated_at DESC LIMIT 1").bind(active.open_id).first<{ id: string; publish_id: string; post_mode: "direct" | "inbox"; status: string }>();
+  if (!saved) return json({ post: null });
+  return json({ post: await refreshPostStatus(env, active.open_id, saved.id, saved) });
+}
+
+async function refreshPostStatus(env: Env, openId: string, id: string, saved: { publish_id: string; post_mode: "direct" | "inbox"; status: string }): Promise<Record<string, unknown>> {
+  const payload = await tikTokJson("/v2/post/publish/status/fetch/", await accessToken(env, openId), { method: "POST", body: JSON.stringify({ publish_id: saved.publish_id }) });
   const data = (payload.data || {}) as Record<string, unknown>;
   const status = String(data.status || saved.status);
-  await env.DB.prepare("UPDATE content_posts SET status = ?, updated_at = ? WHERE id = ? AND open_id = ?").bind(status, now(), id, active.open_id).run();
-  return json({ status, delivery: saved.post_mode === "direct" ? "SELF_ONLY" : "INBOX_DRAFT", fail_reason: data.fail_reason || null, publicaly_available_post_id: data.publicaly_available_post_id || null });
+  await env.DB.prepare("UPDATE content_posts SET status = ?, updated_at = ? WHERE id = ? AND open_id = ?").bind(status, now(), id, openId).run();
+  return { status, delivery: saved.post_mode === "direct" ? "SELF_ONLY" : "INBOX_DRAFT", fail_reason: data.fail_reason || null, publicaly_available_post_id: data.publicaly_available_post_id || null };
 }
 
 async function disconnect(request: Request, env: Env): Promise<Response> {
