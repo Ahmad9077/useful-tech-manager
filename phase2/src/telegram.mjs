@@ -69,6 +69,8 @@ export class TelegramControl {
 export class TelegramClient {
   constructor(token) { this.token = token; this.endpoint = `https://api.telegram.org/bot${token}`; }
   async call(method, payload) { const response = await fetch(`${this.endpoint}/${method}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: json(payload) }); if (!response.ok) throw new Error(`Telegram ${method} failed: ${response.status}`); const body = await response.json(); if (!body.ok) throw new Error(`Telegram ${method} rejected request`); return body.result; }
+  async getUpdates(offset) { return this.call('getUpdates', { offset, timeout: 0, allowed_updates: ['message', 'callback_query'] }); }
+  async answerCallback(callbackQueryId, text = '') { return this.call('answerCallbackQuery', { callback_query_id: callbackQueryId, text, show_alert: false }); }
   async sendReady({ chatId, topic, hook, duration, filePath, keyboard }) {
     const caption = `🎬 New video ready\n\nTopic: ${topic}\nHook: ${hook}\nDuration: ${duration}`;
     if (filePath) { const form = new FormData(); form.set('chat_id', String(chatId)); form.set('caption', caption); form.set('reply_markup', json(keyboard)); form.set('video', new Blob([await (await import('node:fs/promises')).readFile(filePath)], { type: 'video/mp4' }), 'video.mp4'); const response = await fetch(`${this.endpoint}/sendVideo`, { method: 'POST', body: form }); if (!response.ok) throw new Error(`Telegram sendVideo failed: ${response.status}`); return response.json(); }
