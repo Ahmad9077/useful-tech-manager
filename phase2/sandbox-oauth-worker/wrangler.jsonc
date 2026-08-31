@@ -1,0 +1,14 @@
+{
+  "name": "useful-tech-manager-phase2-sandbox",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-31",
+  "workers_dev": true,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "useful-tech-manager-phase2-sandbox",
+      "database_id": "a441d410-c3b4-4c4b-b686-325a69b2a000",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

@@ -8,6 +8,11 @@
     "once": "node src/main.mjs --once",
     "start": "node src/main.mjs",
     "backup": "node bin/backup.mjs",
+    "content-test": "node bin/run-content-test.mjs",
+    "analytics": "node bin/collect-analytics.mjs",
     "check": "node --check src/*.mjs && node --check bin/*.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
   }
 }

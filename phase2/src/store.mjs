@@ -75,6 +75,13 @@ export class Store {
   }
   getContent(contentId) { const row = this.db.prepare('SELECT * FROM content_items WHERE content_id=?').get(contentId); return row && { ...row, current_revision: Number(row.current_revision) }; }
   getRevision(contentId, revisionNumber) { const row = this.db.prepare('SELECT * FROM content_revisions WHERE content_id=? AND revision_number=?').get(contentId, revisionNumber); return row && { ...row, script: parseJson(row.script_json), sources: parseJson(row.source_snapshot_json), settings: parseJson(row.posting_settings_json), qc: parseJson(row.qc_json) }; }
+  setRevisionPlan({ contentId, revisionNumber, script, sources, actor = 'research' }) {
+    return this.transaction(() => {
+      const item = this.getContent(contentId); if (!item || item.current_revision !== revisionNumber) throw new Error('Plan must belong to the current revision');
+      this.db.prepare('UPDATE content_revisions SET script_json=?,source_snapshot_json=? WHERE content_id=? AND revision_number=?').run(json(script), json(sources), contentId, revisionNumber);
+      this.audit('REVISION_PLANNED', actor, { contentId, revisionNumber }); return this.getRevision(contentId, revisionNumber);
+    });
+  }
   transition(contentId, next, actor = 'system') {
     return this.transaction(() => { const item = this.getContent(contentId); if (!item) throw new Error('Unknown content'); if (!canTransition.get(item.state)?.has(next)) throw new Error(`Illegal transition ${item.state} -> ${next}`); const now = isoNow(); this.db.prepare('UPDATE content_items SET state=?,updated_at=? WHERE content_id=?').run(next, now, contentId); this.audit('STATE_CHANGED', actor, { contentId, revisionNumber: item.current_revision, from: item.state, to: next }); return this.getContent(contentId); });
   }
@@ -117,6 +124,12 @@ export class Store {
     const fp = this.revisionFingerprint(contentId, revisionNumber); if (!secureEqual(a.revision_fingerprint, fp) || !secureEqual(intent.revision_fingerprint, fp)) throw new Error('Approval fingerprint no longer matches'); return { item, revision: r, approval: a, intent };
   }
   claimPublishIntent(contentId, revisionNumber, environment = 'sandbox') { return this.transaction(() => { const result = this.assertPublishable(contentId, revisionNumber, environment); const changed = this.db.prepare("UPDATE publish_intents SET status='CLAIMED',attempts=attempts+1,updated_at=? WHERE id=? AND status='QUEUED'").run(isoNow(), result.intent.id); if (!changed.changes) throw new Error('Publish intent is not available to claim'); this.db.prepare('UPDATE content_items SET state=?,updated_at=? WHERE content_id=?').run('PUBLISHING', isoNow(), contentId); this.audit('PUBLISH_CLAIMED', 'publisher', { contentId, revisionNumber }); return { ...result, intent: { ...result.intent, status: 'CLAIMED' } }; }); }
+  markPublishStatus(contentId, revisionNumber, { status, remotePublishId = null, error = null }) {
+    const allowed = new Set(['POLLING', 'COMPLETE', 'FAILED']); if (!allowed.has(status)) throw new Error('Invalid publish status');
+    this.db.prepare('UPDATE publish_intents SET status=?,remote_publish_id=COALESCE(?,remote_publish_id),error_code=?,updated_at=? WHERE content_id=? AND revision_number=? AND environment=?').run(status, remotePublishId, error ? String(error).slice(0, 160) : null, isoNow(), contentId, revisionNumber, 'sandbox');
+    if (status === 'COMPLETE') this.transition(contentId, 'PUBLISHED', 'sandbox-publisher');
+    if (status === 'FAILED') this.transition(contentId, 'APPROVED', 'sandbox-publisher');
+  }
   queueJob(kind, payload, runAfter = isoNow(), idempotencyKey = `${kind}:${randomId()}`) { const now = isoNow(); this.db.prepare('INSERT OR IGNORE INTO workflow_jobs VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(randomId(), kind, json(payload), 'QUEUED', runAfter, null, 0, idempotencyKey, now, now, null); }
   queueOutbox(kind, payload, idempotencyKey) { const now = isoNow(); this.db.prepare('INSERT OR IGNORE INTO outbox VALUES(?,?,?,?,?,?,?,?,?,?)').run(randomId(), kind, json(payload), 'QUEUED', 0, now, idempotencyKey, now, now, null); }
   listContent(limit = 50) { return this.db.prepare('SELECT * FROM content_items ORDER BY updated_at DESC LIMIT ?').all(limit); }

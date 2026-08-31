@@ -15,7 +15,9 @@ function parseEnvFile(file) {
 export function loadConfig(env = process.env) {
   const configFile = env.UTM_CONFIG_FILE || path.join(defaultDataDir, 'phase2.env'); const local = parseEnvFile(configFile);
   if (local.TELEGRAM_BOT_TOKEN && !local.TELEGRAM_SIGNING_SECRET && !env.TELEGRAM_SIGNING_SECRET) { mkdirSync(path.dirname(configFile), { recursive: true, mode: 0o700 }); appendFileSync(configFile, `TELEGRAM_SIGNING_SECRET=${randomBytes(32).toString('base64url')}\n`, { mode: 0o600 }); chmodSync(configFile, 0o600); local.TELEGRAM_SIGNING_SECRET = parseEnvFile(configFile).TELEGRAM_SIGNING_SECRET; }
-  const all = { ...local, ...env };
+  // A blank inherited shell variable must never mask the protected local value.
+  const nonBlankEnv = Object.fromEntries(Object.entries(env).filter(([, value]) => typeof value === 'string' && value.length > 0));
+  const all = { ...local, ...nonBlankEnv };
   const tiktokEnv = all.TIKTOK_ENV || 'sandbox';
   if (!['sandbox', 'production'].includes(tiktokEnv)) throw new Error('TIKTOK_ENV must be sandbox or production');
   const productionEnabled = all.TIKTOK_PRODUCTION_ENABLED === 'true';
@@ -28,6 +30,18 @@ export function loadConfig(env = process.env) {
     tiktokEnv,
     productionEnabled,
     telegram: { token: all.TELEGRAM_BOT_TOKEN || '', ownerUserId: all.TELEGRAM_OWNER_USER_ID || '', ownerChatId: all.TELEGRAM_OWNER_CHAT_ID || '', signingSecret: all.TELEGRAM_SIGNING_SECRET || '' },
+    cartesiaKeychainService: all.CARTESIA_KEYCHAIN_SERVICE || '',
+    cartesiaKeychainAccount: all.CARTESIA_KEYCHAIN_ACCOUNT || '',
+    cartesiaVoiceId: all.CARTESIA_VOICE_ID || '',
+    geminiKeychainService: all.GEMINI_KEYCHAIN_SERVICE || '',
+    geminiKeychainAccount: all.GEMINI_KEYCHAIN_ACCOUNT || '',
+    tiktokSandbox: {
+      clientKey: all.TIKTOK_SANDBOX_CLIENT_KEY || '',
+      clientSecret: all.TIKTOK_SANDBOX_CLIENT_SECRET || '',
+      oauthWorkerUrl: all.TIKTOK_SANDBOX_OAUTH_WORKER_URL || '',
+      controlKeychainService: all.TIKTOK_SANDBOX_CONTROL_KEYCHAIN_SERVICE || '',
+      controlKeychainAccount: all.TIKTOK_SANDBOX_CONTROL_KEYCHAIN_ACCOUNT || '',
+    },
   });
 }
 export function persistTelegramOwner(config, { userId, chatId }) {

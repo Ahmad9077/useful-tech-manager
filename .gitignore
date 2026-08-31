@@ -13,3 +13,5 @@ phase2/logs/
 phase2/*.sqlite
 phase2/*.sqlite-*
 phase2/.env
+phase2/node_modules/
+phase2/sandbox-oauth-worker/.wrangler/
