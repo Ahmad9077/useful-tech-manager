@@ -19,7 +19,7 @@ Open `index.html` directly in a browser, or serve this directory with any static
 
 The Worker is deployed from `worker/`. Apply its D1 migrations before deployment. Configure the TikTok sandbox client key, client secret, and 32-byte base64url token-encryption key as Worker secrets; never place them in repository files.
 
-The app supports explicit creator-approved TikTok Direct Posts. It requests the current creator information before the posting form is shown, uses TikTok's current privacy and interaction settings, and never publishes content automatically. During unaudited Sandbox testing, TikTok restricts Direct Posts to private viewing when the account is eligible.
+TikTok's current Content Posting API configuration automatically retains both its Direct Post and Inbox Draft scopes. The app therefore supports both explicit creator-approved delivery paths: a Direct Post using current creator information, and an Inbox Draft for the creator to finish in TikTok. It never publishes content automatically. During unaudited Sandbox testing, TikTok restricts Direct Posts to private viewing when the account is eligible.
 
 ## Contact
 

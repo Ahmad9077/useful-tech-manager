@@ -18,7 +18,7 @@ interface D1PreparedStatement {
 }
 
 const TIKTOK_API = "https://open.tiktokapis.com";
-const OAUTH_SCOPES = ["user.info.basic", "user.info.stats", "video.list", "video.publish"];
+const OAUTH_SCOPES = ["user.info.basic", "user.info.stats", "video.list", "video.upload", "video.publish"];
 const MAX_VIDEO_BYTES = 64 * 1024 * 1024;
 const SESSION_SECONDS = 8 * 60 * 60;
 const OAUTH_SECONDS = 10 * 60;
@@ -277,6 +277,7 @@ async function publishVideo(request: Request, env: Env): Promise<Response> {
   const hashtags = String(form.get("hashtags") || "").trim();
   const title = [caption, hashtags].filter(Boolean).join(" ");
   const consent = String(form.get("approval") || "");
+  const mode = String(form.get("mode") || "");
   const privacyLevel = String(form.get("privacy_level") || "");
   const durationSeconds = Number(form.get("duration_seconds") || 0);
   const allowComment = checked(form, "allow_comment");
@@ -289,30 +290,34 @@ async function publishVideo(request: Request, env: Env): Promise<Response> {
   if (!isMp4(file, new Uint8Array(await file.slice(0, 16).arrayBuffer()))) throw new AppError("Choose a valid MP4 video.");
   if (title.length > 2200) throw new AppError("Caption and hashtags are too long.");
   if (consent !== "approved") throw new AppError("Creator approval is required before TikTok can receive a video.", 422);
-  if (String(form.get("music_confirmation") || "") !== "confirmed" || String(form.get("declaration") || "") !== "confirmed") throw new AppError("Confirm the TikTok declarations before publishing.", 422);
-  if (commercialContent && !yourBrand && !brandedContent) throw new AppError("Select Your Brand or Branded Content when the commercial disclosure is enabled.", 422);
-  if (!commercialContent && (yourBrand || brandedContent)) throw new AppError("Enable the commercial disclosure before selecting a commercial content option.", 422);
-  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) throw new AppError("TikTok needs the selected video's duration before publishing.", 422);
+  if (mode !== "direct" && mode !== "inbox") throw new AppError("Select a TikTok delivery type.", 422);
+  if (mode === "direct" && (String(form.get("music_confirmation") || "") !== "confirmed" || String(form.get("declaration") || "") !== "confirmed")) throw new AppError("Confirm the TikTok declarations before publishing.", 422);
+  if (mode === "direct" && commercialContent && !yourBrand && !brandedContent) throw new AppError("Select Your Brand or Branded Content when the commercial disclosure is enabled.", 422);
+  if (mode === "direct" && !commercialContent && (yourBrand || brandedContent)) throw new AppError("Enable the commercial disclosure before selecting a commercial content option.", 422);
+  if (mode === "direct" && (!Number.isFinite(durationSeconds) || durationSeconds <= 0)) throw new AppError("TikTok needs the selected video's duration before publishing.", 422);
   const token = await accessToken(env, active.open_id);
-  const creatorResponse = await tikTokJson("/v2/post/publish/creator_info/query/", token, { method: "POST", body: "{}" });
-  const creator = creatorData((creatorResponse.data || {}) as Record<string, unknown>);
-  if (!creator.privacy_level_options.includes(privacyLevel)) throw new AppError("Choose one of TikTok's current privacy settings before publishing.", 422);
-  if (creator.max_video_post_duration_sec > 0 && durationSeconds > creator.max_video_post_duration_sec) throw new AppError("This video is longer than TikTok currently permits for this creator.", 422);
-  if ((creator.comment_disabled && allowComment) || (creator.duet_disabled && allowDuet) || (creator.stitch_disabled && allowStitch)) throw new AppError("One or more selected interactions are not currently available for this TikTok creator.", 422);
+  let creator: CreatorInfo | null = null;
+  if (mode === "direct") {
+    const creatorResponse = await tikTokJson("/v2/post/publish/creator_info/query/", token, { method: "POST", body: "{}" });
+    creator = creatorData((creatorResponse.data || {}) as Record<string, unknown>);
+    if (!creator.privacy_level_options.includes(privacyLevel)) throw new AppError("Choose one of TikTok's current privacy settings before publishing.", 422);
+    if (creator.max_video_post_duration_sec > 0 && durationSeconds > creator.max_video_post_duration_sec) throw new AppError("This video is longer than TikTok currently permits for this creator.", 422);
+    if ((creator.comment_disabled && allowComment) || (creator.duet_disabled && allowDuet) || (creator.stitch_disabled && allowStitch)) throw new AppError("One or more selected interactions are not currently available for this TikTok creator.", 422);
+  }
   const chunkSize = file.size < 5 * 1024 * 1024 ? file.size : 10 * 1024 * 1024;
   const totalChunks = Math.ceil(file.size / chunkSize);
-  const initialized = await tikTokJson("/v2/post/publish/video/init/", token, {
+  const initialized = await tikTokJson(mode === "direct" ? "/v2/post/publish/video/init/" : "/v2/post/publish/inbox/video/init/", token, {
     method: "POST",
     body: JSON.stringify({
-      post_info: {
+      ...(mode === "direct" ? { post_info: {
         title,
         privacy_level: privacyLevel,
-        disable_duet: creator.duet_disabled || !allowDuet,
-        disable_comment: creator.comment_disabled || !allowComment,
-        disable_stitch: creator.stitch_disabled || !allowStitch,
+        disable_duet: creator!.duet_disabled || !allowDuet,
+        disable_comment: creator!.comment_disabled || !allowComment,
+        disable_stitch: creator!.stitch_disabled || !allowStitch,
         brand_content_toggle: brandedContent,
         brand_organic_toggle: yourBrand
-      },
+      } } : {}),
       source_info: { source: "FILE_UPLOAD", video_size: file.size, chunk_size: chunkSize, total_chunk_count: totalChunks }
     })
   });
@@ -322,7 +327,7 @@ async function publishVideo(request: Request, env: Env): Promise<Response> {
   if (!uploadUrl || !publishId) throw new AppError("TikTok did not initialize the Direct Post upload.", 502);
   const id = randomUrl(18);
   await env.DB.prepare("INSERT INTO content_posts (id, open_id, publish_id, post_mode, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .bind(id, active.open_id, publishId, "direct", "INITIALIZED", now(), now()).run();
+    .bind(id, active.open_id, publishId, mode, "INITIALIZED", now(), now()).run();
   try {
     for (let start = 0; start < file.size; start += chunkSize) {
       const end = Math.min(file.size, start + chunkSize);
@@ -335,31 +340,31 @@ async function publishVideo(request: Request, env: Env): Promise<Response> {
     throw error;
   }
   await env.DB.prepare("UPDATE content_posts SET status = ?, updated_at = ? WHERE id = ? AND open_id = ?").bind("PROCESSING", now(), id, active.open_id).run();
-  return json({ id, status: "PROCESSING", delivery: "DIRECT_POST" });
+  return json({ id, status: "PROCESSING", delivery: mode === "direct" ? "DIRECT_POST" : "INBOX_DRAFT" });
 }
 
 async function postStatus(request: Request, env: Env, url: URL): Promise<Response> {
   const active = await session(request, env);
   const id = url.searchParams.get("id");
   if (!id || !/^[A-Za-z0-9_-]{12,64}$/.test(id)) throw new AppError("Unknown post.", 404);
-  const saved = await env.DB.prepare("SELECT publish_id, post_mode, status FROM content_posts WHERE id = ? AND open_id = ?").bind(id, active.open_id).first<{ publish_id: string; post_mode: string; status: string }>();
-  if (!saved || saved.post_mode !== "direct") throw new AppError("Unknown post.", 404);
+  const saved = await env.DB.prepare("SELECT publish_id, post_mode, status FROM content_posts WHERE id = ? AND open_id = ?").bind(id, active.open_id).first<{ publish_id: string; post_mode: "direct" | "inbox"; status: string }>();
+  if (!saved) throw new AppError("Unknown post.", 404);
   return json(await refreshPostStatus(env, active.open_id, id, saved));
 }
 
 async function latestPostStatus(request: Request, env: Env): Promise<Response> {
   const active = await session(request, env);
-  const saved = await env.DB.prepare("SELECT id, publish_id, post_mode, status FROM content_posts WHERE open_id = ? AND post_mode = 'direct' ORDER BY updated_at DESC LIMIT 1").bind(active.open_id).first<{ id: string; publish_id: string; post_mode: "direct"; status: string }>();
+  const saved = await env.DB.prepare("SELECT id, publish_id, post_mode, status FROM content_posts WHERE open_id = ? ORDER BY updated_at DESC LIMIT 1").bind(active.open_id).first<{ id: string; publish_id: string; post_mode: "direct" | "inbox"; status: string }>();
   if (!saved) return json({ post: null });
   return json({ post: await refreshPostStatus(env, active.open_id, saved.id, saved) });
 }
 
-async function refreshPostStatus(env: Env, openId: string, id: string, saved: { publish_id: string; post_mode: "direct"; status: string }): Promise<Record<string, unknown>> {
+async function refreshPostStatus(env: Env, openId: string, id: string, saved: { publish_id: string; post_mode: "direct" | "inbox"; status: string }): Promise<Record<string, unknown>> {
   const payload = await tikTokJson("/v2/post/publish/status/fetch/", await accessToken(env, openId), { method: "POST", body: JSON.stringify({ publish_id: saved.publish_id }) });
   const data = (payload.data || {}) as Record<string, unknown>;
   const status = String(data.status || saved.status);
   await env.DB.prepare("UPDATE content_posts SET status = ?, updated_at = ? WHERE id = ? AND open_id = ?").bind(status, now(), id, openId).run();
-  return { status, delivery: "DIRECT_POST", fail_reason: data.fail_reason || null, publically_available_post_id: data.publically_available_post_id || null };
+  return { status, delivery: saved.post_mode === "direct" ? "DIRECT_POST" : "INBOX_DRAFT", fail_reason: data.fail_reason || null, publically_available_post_id: data.publically_available_post_id || null };
 }
 
 async function disconnect(request: Request, env: Env): Promise<Response> {
