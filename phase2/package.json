@@ -1,0 +1,13 @@
+{
+  "name": "useful-tech-manager-phase2",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "once": "node src/main.mjs --once",
+    "start": "node src/main.mjs",
+    "backup": "node bin/backup.mjs",
+    "check": "node --check src/*.mjs && node --check bin/*.mjs"
+  }
+}

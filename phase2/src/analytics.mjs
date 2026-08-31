@@ -1,0 +1,5 @@
+import { isoNow, json, parseJson } from './util.mjs';
+
+export function deriveMetrics(rows) { return rows.map((row) => { const views = Number(row.views || 0); return { ...row, likeRate: views ? Number(row.likes || 0) / views : null, shareRate: views ? Number(row.shares || 0) / views : null, commentRate: views ? Number(row.comments || 0) / views : null }; }); }
+export function addSnapshot(store, { contentId = null, views = null, likes = null, shares = null, comments = null, followers = null, raw = {} }) { store.db.prepare('INSERT INTO analytics_snapshots(content_id,captured_at,views,likes,shares,comments,followers,raw_json) VALUES(?,?,?,?,?,?,?,?)').run(contentId, isoNow(), views, likes, shares, comments, followers, json(raw)); }
+export function analyticsSummary(store) { const rows = store.db.prepare('SELECT * FROM analytics_snapshots ORDER BY captured_at DESC LIMIT 100').all(); return { snapshots: deriveMetrics(rows), commentTextIngestion: 'disabled — no authorized official comments API configured' }; }

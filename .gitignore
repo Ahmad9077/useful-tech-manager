@@ -5,3 +5,11 @@ worker/test-assets/
 review-recording/
 TikTok_App_Review_Demo.mp4
 TikTok_App_Review_Demo_v2.mp4
+.agents/
+phase2/runtime/
+phase2/working/
+phase2/backups/
+phase2/logs/
+phase2/*.sqlite
+phase2/*.sqlite-*
+phase2/.env
