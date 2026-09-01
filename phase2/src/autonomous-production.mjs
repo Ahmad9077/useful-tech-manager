@@ -56,7 +56,7 @@ export async function researchIphoneWebcam({ store, contentId }) {
 
 export async function writeVerifiedIphoneWebcamScript({ store, contentId, revisionNumber, sources }) {
   // Tashkeel below is intentionally narration-only. Captions use normal Arabic and Latin product names.
-  const narration = `إِذَا كَامِيرَة المَاك مَو بِالمُسْتَوَى، لَا تَشْتَرِي Webcam قَبْل مَا تُجَرِّب هالحَرْكَة.\n\nإِذَا عِنْدَكَ iPhone وَMac، تِقْدَر تِخَلِّي كَامِيرَة iPhone هِي Webcam لِلمَاك بِمِيزَة Continuity Camera.\n\nثَبِّت iPhone قَرِيب مِن Mac، وَخَلِّه مَقْفُول وَالكَامِيرَة الخَلْفِيَّة بَاتِّجَاهَك. بَعْدَهَا اِفْتَح FaceTime، أَو أَيّ تَطْبِيق يَدْعَم الكَامِيرَا، وَاخْتَر iPhone مِن إِعْدَادَات الفِيدْيُو.\n\nتِشْتَغِل لَا سِلْكِيًّا، أَو بِسِلْك USB إِذَا تِبْغَى تِشْحَن iPhone.\n\nوَقَبْل تَبْدَا: لَازِم iPhone XR أَو أَحْدَث مَع iOS 16، وَMac يَدْعَم macOS Ventura. وَالجِهَازَيْن عَلَى نَفْس Apple Account، مَع Wi-Fi وَBluetooth شَغَّالِينَ.\n\nاِحْفَظ اِسْم المِيزَة: Continuity Camera.`;
+  const narration = `إِذَا كَامِيرَة المَاك مَو بِالمُسْتَوَى، لَا تَشْتَرِي Webcam قَبْل مَا تُجَرِّب هالحَرْكَة.\n\nإِذَا عِنْدَكَ iPhone وَMac، تِقْدَر تِخَلِّي كَامِيرَة iPhone هِي Webcam لِلمَاك بِمِيزَة Continuity Camera.\n\nثَبِّت iPhone قَرِيب مِن Mac، وَخَلِّه مَقْفُول وَالكَامِيرَة الخَلْفِيَّة بَاتِّجَاهَك. بَعْدَهَا اِفْتَح FaceTime، أَو أَيّ تَطْبِيق يَدْعَم الكَامِيرَا، وَاخْتَر iPhone مِن إِعْدَادَات الفِيدْيُو.\n\nتِشْتَغِل لَا سِلْكِيًّا، أَو بِسِلْك USB إِذَا تِبْغَى تِشْحَن iPhone.\n\nوَقَبْل تَبْدَا: لَازِم iPhone XR أَو أَحْدَث مَع iOS 16، وَMac يَدْعَم macOS Ventura. وَالجِهَازَيْن عَلَى نَفْس Apple Account، مَع وَاي فَاي وَBluetooth شَغَّالِينَ.\n\nاِحْفَظ اِسْم المِيزَة: Continuity Camera.`;
   const script = {
     narration,
     caption: 'حوّل iPhone إلى Webcam للـ Mac',
@@ -69,33 +69,55 @@ export async function writeVerifiedIphoneWebcamScript({ store, contentId, revisi
   return script;
 }
 
+// Caption text intentionally covers only the viewer-facing beats. Every cue is
+// anchored to the final Cartesia word timings, not an estimated word count.
+// This prevents a card from remaining on-screen after the narration has moved
+// to the next instruction.
 const CAPTION_PLAN = Object.freeze([
-  { line1: 'كاميرا Mac مو بالمستوى؟', line2: 'حوّل iPhone إلى Webcam', words: 12, theme: 'DARK_NAVY' },
-  { line1: 'اسمها Continuity Camera', line2: 'وتجي من Apple بدون تطبيق إضافي', words: 14, theme: 'DARK_NAVY' },
-  { line1: 'ثبت iPhone قريب من Mac', line2: 'وخله مقفل والكاميرا الخلفية باتجاهك', words: 14, theme: 'DARK_NAVY' },
-  { line1: 'في FaceTime أو أي تطبيق كاميرا:', line2: 'اختر iPhone من إعدادات الفيديو', words: 16, theme: 'DARK_NAVY' },
-  { line1: 'تشتغل لاسلكياً أو عبر USB', line2: 'إذا تبغى تشحن iPhone أثناء الاستخدام', words: 12, theme: 'DARK_NAVY' },
-  { line1: 'تأكد من المتطلبات قبل تبدأ', line2: 'iPhone XR + iOS 16 و macOS Ventura', words: 16, theme: 'DARK_NAVY' },
-  { line1: 'نفس Apple Account', line2: 'وWi-Fi وBluetooth شغالين', words: 12, theme: 'DARK_NAVY' },
-  { line1: 'احفظ الاسم', line2: 'Continuity Camera', words: 99, theme: 'DARK_NAVY' },
+  { line1: 'كاميرا Mac مو بالمستوى؟', line2: 'لا تشتري Webcam قبل ما تجرب', start: ['كَامِيرَة', 'المَاك'], end: ['هالحَرْكَة'], theme: 'DARK_NAVY' },
+  { line1: 'خلّ كاميرا iPhone تصير Webcam للـ Mac', line2: 'بميزة Continuity Camera', start: ['تِقْدَر', 'تِخَلِّي'], end: ['Camera'], theme: 'DARK_NAVY' },
+  { line1: 'اختر iPhone من إعدادات الفيديو', start: ['وَاخْتَر', 'iPhone'], end: ['الفِيدْيُو'], theme: 'DARK_NAVY' },
+  { line1: 'تشتغل لاسلكياً أو بسلك USB', line2: 'إذا تبغى تشحن iPhone', start: ['تِشْتَغِل', 'لَا'], end: ['iPhone'], theme: 'DARK_NAVY' },
+  { line1: 'iPhone XR أو أحدث مع iOS 16', line2: 'و Mac يدعم macOS Ventura', start: ['لَازِم', 'iPhone'], end: ['Ventura'], theme: 'DARK_NAVY' },
+  { line1: 'نفس Apple Account', line2: 'و Wi-Fi و Bluetooth شغالين', start: ['وَالجِهَازَيْن', 'عَلَى'], end: ['شَغَّالِينَ'], theme: 'DARK_NAVY' },
+  { line1: 'احفظ الاسم', line2: 'Continuity Camera', start: ['اِحْفَظ', 'اِسْم'], end: ['Camera'], theme: 'DARK_NAVY' },
 ]);
+
+const normalizeTimestampToken = (value) => String(value || '')
+  .normalize('NFD')
+  .replace(/\p{M}/gu, '')
+  .replace(/[^\p{L}\p{N}]+/gu, '')
+  .replace(/[أإآ]/g, 'ا')
+  .replace(/ى/g, 'ي')
+  .toLowerCase();
+
+function findPhrase(words, phrase, fromIndex) {
+  const targets = phrase.map(normalizeTimestampToken).filter(Boolean);
+  for (let index = fromIndex; index <= words.length - targets.length; index += 1) {
+    if (targets.every((target, offset) => normalizeTimestampToken(words[index + offset]?.text) === target)) return index + targets.length - 1;
+  }
+  return -1;
+}
 
 function buildAudioSyncedCaptionCues(timestamps) {
   const words = timestamps.filter((word) => Number.isFinite(word.start) && Number.isFinite(word.end) && word.end >= word.start).sort((a, b) => a.start - b.start);
   if (!words.length) throw new Error('CARTESIA_WORD_TIMESTAMPS_MISSING');
   const cues = []; let cursor = 0;
-  for (let index = 0; index < CAPTION_PLAN.length && cursor < words.length; index += 1) {
+  for (let index = 0; index < CAPTION_PLAN.length; index += 1) {
     const plan = CAPTION_PLAN[index];
-    const endIndex = index === CAPTION_PLAN.length - 1 ? words.length - 1 : Math.min(words.length - 1, cursor + plan.words - 1);
-    const start = Math.max(0, words[cursor].start - 0.03);
+    const startIndex = findPhrase(words, plan.start, cursor);
+    if (startIndex < 0) throw new Error(`CAPTION_START_ANCHOR_NOT_FOUND:${index + 1}`);
+    const endIndex = findPhrase(words, plan.end, startIndex);
+    if (endIndex < startIndex) throw new Error(`CAPTION_END_ANCHOR_NOT_FOUND:${index + 1}`);
+    const start = Math.max(0, words[startIndex].start - 0.03);
     const end = Math.max(start + 0.45, words[endIndex].end + 0.14);
-    cues.push({ id: `cue-${index + 1}`, start, end, line1: plan.line1, line2: plan.line2, theme: plan.theme, sourceWordStart: cursor, sourceWordEnd: endIndex });
+    cues.push({ id: `cue-${index + 1}`, start, end, line1: plan.line1, line2: plan.line2, theme: plan.theme, sourceWordStart: startIndex, sourceWordEnd: endIndex });
     cursor = endIndex + 1;
   }
   // Never show two caption cards at once. If Cartesia's adjacent word timing
   // overlaps slightly, the new spoken phrase wins at its actual start.
   for (let index = 0; index < cues.length - 1; index += 1) cues[index].end = Math.min(cues[index].end, Math.max(cues[index].start + 0.45, cues[index + 1].start - 0.02));
-  if (cues.length < 6) throw new Error('CARTESIA_WORD_TIMESTAMPS_INSUFFICIENT');
+  if (cues.length < 5) throw new Error('CARTESIA_WORD_TIMESTAMPS_INSUFFICIENT');
   return cues;
 }
 

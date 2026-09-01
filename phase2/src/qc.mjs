@@ -75,15 +75,15 @@ export async function usefulTechDesignQc({ sourceProject, visualSystemPath, cues
   ]);
   const manifest = JSON.parse(await readFile(visualSystemPath, 'utf8'));
   const issues = []; const mixed = (cues || []).filter((cue) => /[\u0600-\u06FF]/.test(`${cue.line1} ${cue.line2 || ''}`) && /[A-Za-z]/.test(`${cue.line1} ${cue.line2 || ''}`));
-  if (!composition.includes('<BrandBug/>') || !system.includes("staticFile('brand/useful-tech-logo.png')")) issues.push('MISSING_CANONICAL_BRAND_BUG');
-  if (composition.includes('@useful.tech.ar') || composition.includes('TikTok')) issues.push('BRAND_GROUPED_WITH_PLATFORM_UI');
-  if (!system.includes('top:64') || !system.includes("left:'50%'")) issues.push('BRAND_SAFE_PLACEMENT_INVALID');
-  if (!composition.includes('<ActiveConcept/>') || !system.includes('zIndex:70')) issues.push('ACTIVE_ICON_NOT_FOREGROUND');
+  if (!composition.includes('<AccountIdentifier/>') || !system.includes("staticFile('brand/useful-tech-logo.png')")) issues.push('MISSING_CANONICAL_BRAND_BUG');
+  if (!system.includes('TikTokAccountBug') || !system.includes('@useful.tech.ar') || !system.includes('TikTokMark')) issues.push('MISSING_TIKTOK_ACCOUNT_IDENTIFIER');
+  if (!system.includes('top:68') || !system.includes('top:136') || !system.includes('left:58')) issues.push('BRAND_SAFE_PLACEMENT_INVALID');
+  if (!composition.includes('<ActiveConcept/>') || !system.includes('zIndex:105')) issues.push('ACTIVE_ICON_NOT_FOREGROUND');
   if (!composition.includes('<CaptionRail cues={captionCues}/>') || !system.includes('AudioSyncedCaption')) issues.push('AUDIO_SYNCED_CAPTIONS_NOT_USED');
   if (!system.includes('dir="rtl"') || !system.includes('<bdi') || !system.includes("unicodeBidi:'isolate'")) issues.push('RTL_BIDI_RENDERER_INVALID');
   if (forbiddenBidiControls.test(composition) || forbiddenBidiControls.test(system) || mixed.some((cue) => forbiddenBidiControls.test(`${cue.line1}${cue.line2 || ''}`))) issues.push('FORBIDDEN_BIDI_CONTROL_FOUND');
   if (!system.includes('DARK_NAVY') || !system.includes('LIGHT_IVORY') || !system.includes('TEAL') || !system.includes('background:theme.surface')) issues.push('ADAPTIVE_CAPTION_SURFACE_INVALID');
   if (!manifest.enforcement?.activeForegroundRequired || !manifest.enforcement?.audioSyncedCaptionsRequired || !manifest.enforcement?.trueRtlRequired || !manifest.enforcement?.canonicalBrandBugRequired || !manifest.enforcement?.adaptiveCaptionSurfaceRequired) issues.push('DESIGN_ENFORCEMENT_MANIFEST_INVALID');
   try { await access(path.join(sourceProject, 'public', 'brand', 'useful-tech-logo.png')); } catch { issues.push('CANONICAL_LOGO_ASSET_MISSING'); }
-  return { pass: issues.length === 0, issues, mixedCaptionCount: mixed.length, foreground: !issues.includes('ACTIVE_ICON_NOT_FOREGROUND'), brand: !issues.some((issue) => issue.startsWith('MISSING_CANONICAL') || issue.startsWith('BRAND_') || issue === 'CANONICAL_LOGO_ASSET_MISSING'), rtl: !issues.some((issue) => issue.includes('RTL') || issue.includes('BIDI')), captionSurface: !issues.includes('ADAPTIVE_CAPTION_SURFACE_INVALID') };
+  return { pass: issues.length === 0, issues, mixedCaptionCount: mixed.length, foreground: !issues.includes('ACTIVE_ICON_NOT_FOREGROUND'), brand: !issues.some((issue) => issue.startsWith('MISSING_CANONICAL') || issue.startsWith('MISSING_TIKTOK') || issue.startsWith('BRAND_') || issue === 'CANONICAL_LOGO_ASSET_MISSING'), rtl: !issues.some((issue) => issue.includes('RTL') || issue.includes('BIDI')), captionSurface: !issues.includes('ADAPTIVE_CAPTION_SURFACE_INVALID') };
 }

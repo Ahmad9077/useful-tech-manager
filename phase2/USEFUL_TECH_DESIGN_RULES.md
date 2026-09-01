@@ -14,7 +14,7 @@ Caption surfaces use canonical related-color themes: DARK_NAVY, LIGHT_IVORY, BLU
 
 ## Brand
 
-`BrandBug` always uses the approved profile logo in the upper-centre safe zone. It is a quiet video-content watermark, independent from TikTok username, logo, or controls.
+`AccountIdentifier` always uses the approved profile logo in a small upper-left channel pill. A matching secondary pill directly beneath it contains the TikTok mark and `@useful.tech.ar`. Both are quiet video artwork, separate from TikTok's own username, logo, and controls.
 
 ## Required quality gates
 
