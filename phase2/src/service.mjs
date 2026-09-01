@@ -74,11 +74,12 @@ export class Phase2Service {
         return;
       }
       if (job.kind === 'RUN_STAGE' && payload.contentId) {
-        const attempt = Number(job.attempts || 1); const transient = /TEMPORARY|timeout|network|fetch failed|Cartesia|RESEARCH_SOURCE_UNAVAILABLE/i.test(message);
-        if (transient && attempt < 3) {
+        const attempt = Number(job.attempts || 1); const retryable = /TEMPORARY|timeout|network|fetch failed|Cartesia|RESEARCH_SOURCE_UNAVAILABLE|RENDER_VISUAL_QC_FAILED/i.test(message);
+        if (retryable && attempt < 3) {
           const delay = [3_000, 15_000, 60_000][attempt - 1] || 60_000; const retryAt = new Date(Date.now() + delay).toISOString();
-          const retry = this.store.queueStageIfAbsent({ contentId: payload.contentId, revisionNumber: Number(payload.revisionNumber), stage: payload.stage, runAfter: retryAt, attempt });
-          this.store.updateProgress({ contentId: payload.contentId, stage: payload.stage, workerStatus: 'WAITING', jobId: retry.job?.id || null, waitingReason: 'WAITING_FOR_PROVIDER_RETRY', waitingSince: isoNow(), nextRetryAt: retryAt, attemptCount: attempt, lastError: message });
+          const retryStage = /RENDER_VISUAL_QC_FAILED/.test(message) ? 'RENDERING' : payload.stage;
+          const retry = this.store.queueStageIfAbsent({ contentId: payload.contentId, revisionNumber: Number(payload.revisionNumber), stage: retryStage, runAfter: retryAt, attempt });
+          this.store.updateProgress({ contentId: payload.contentId, stage: retryStage, workerStatus: 'WAITING', jobId: retry.job?.id || null, waitingReason: 'WAITING_FOR_PROVIDER_RETRY', waitingSince: isoNow(), nextRetryAt: retryAt, attemptCount: attempt, lastError: message });
         } else {
           try { const item = this.store.getContent(payload.contentId); if (item && !['PUBLISHED','REJECTED','SKIPPED','FAILED'].includes(item.state)) { this.store.transition(payload.contentId, 'FAILED', 'pipeline'); this.store.updateProgress({ contentId: payload.contentId, stage: 'FAILED', workerStatus: 'FAILED', lastError: message, waitingReason: null, waitingSince: null }); this.store.queueTerminalFailureOnce(payload.contentId); } } catch { /* preserve error */ }
         }
