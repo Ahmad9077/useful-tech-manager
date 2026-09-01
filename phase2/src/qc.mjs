@@ -24,7 +24,10 @@ export async function inspectMp4(file) {
 export async function visualQc(file, { framesDir, sceneTimes = [0, 1, 2, 7, 13, 20, 28, 35, 43] } = {}) {
   const technical = await inspectMp4(file); if (!technical.masterProfilePass) return { pass: false, technical, frames: [], reason: 'TECHNICAL_MASTER_INVALID' };
   const root = framesDir || path.join(path.dirname(file), 'qc-frames'); await mkdir(root, { recursive: true, mode: 0o700 });
-  const times = [...new Set([...sceneTimes.filter((time) => time < technical.duration), Math.max(0, technical.duration - 0.25)])]; const frames = [];
+  // H.264's reported container duration may extend a fraction beyond the last
+  // decodable video PTS. Keep every sample safely inside the final frame.
+  const finalSample = Math.max(0, technical.duration - 0.25);
+  const times = [...new Set([...sceneTimes.filter((time) => time <= finalSample), finalSample])]; const frames = [];
   for (const [index, time] of times.entries()) {
     const frame = path.join(root, `frame-${String(index).padStart(2, '0')}-${String(time).replace('.', '_')}.jpg`);
     await run('ffmpeg', ['-y', '-ss', String(time), '-i', file, '-frames:v', '1', '-q:v', '2', frame]);
