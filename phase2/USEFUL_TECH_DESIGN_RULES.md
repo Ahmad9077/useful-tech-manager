@@ -6,9 +6,13 @@ Every Useful Tech render uses the canonical Remotion system in `LocalSend-Style-
 
 Scene layers are fixed: environment, supporting graphics, device/UI, active concept, captions, then brand bug. A concept introduced by narration must enter as the foreground focal element; it cannot be decoratively faint, behind a device, or obscured by a card.
 
+Explainer cards stay fully foreground for the entire spoken beat they explain. A closing treatment may begin only after those cards have exited, never as a translucent layer that covers them. End cards must include a spoken close; they do not replace narration with an empty music-only section.
+
 ## Captions and language
 
 Caption cues are generated from final Cartesia Walid word timestamps. A TTS, pause, pace, pronunciation, or script change invalidates old cues. Arabic captions are native RTL browser text. Inline English product names use isolated LTR `bdi` elements; Arabic is never manually reversed.
+
+For `Wi-Fi`, the Cartesia private pronunciation dictionary is mandatory and renders the spoken form as «واي فاي». If that protected dictionary is unavailable, the production voice step fails rather than silently using a weaker reading.
 
 Caption surfaces use canonical related-color themes: DARK_NAVY, LIGHT_IVORY, BLUE, TEAL, NEUTRAL_DARK, and NEUTRAL_LIGHT. The surface remains calm relative to the scene while text remains strongly readable.
 
