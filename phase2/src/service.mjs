@@ -153,8 +153,12 @@ export class Phase2Service {
     for (const row of rows) {
       const current = this.store.getProgress(row.content_id); const dueRetry = current.worker_status === 'WAITING' && current.next_retry_at && current.next_retry_at <= now;
       const invalidWait = current.worker_status === 'WAITING' && (!current.waiting_reason || (AUTOMATED_STAGES.includes(current.current_stage) && !dueRetry));
-      const hasJob = this.store.findActiveStageJob(row.content_id, row.current_revision, current.current_stage);
-      if ((current.worker_status === 'RUNNING' && !hasJob) || (current.worker_status === 'QUEUED' && !hasJob) || dueRetry || invalidWait) this.queueNextStage(row.content_id, row.current_revision, current.current_stage);
+      // REVISING is a human/request transition, not an executable production
+      // stage. Its durable RENDER_REVISION job owns the hand-off to
+      // GENERATING_VOICE; the watchdog must never invent a RUN_STAGE(REVISING).
+      const executableStage = AUTOMATED_STAGES.includes(current.current_stage);
+      const hasJob = executableStage && this.store.findActiveStageJob(row.content_id, row.current_revision, current.current_stage);
+      if (executableStage && ((current.worker_status === 'RUNNING' && !hasJob) || (current.worker_status === 'QUEUED' && !hasJob) || dueRetry || invalidWait)) this.queueNextStage(row.content_id, row.current_revision, current.current_stage);
     }
   }
   async sendReady(content, revision, duration) {
