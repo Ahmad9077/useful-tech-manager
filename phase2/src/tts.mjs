@@ -9,9 +9,9 @@ export const WALID_PRODUCTION_PROFILE = Object.freeze({
   language: 'ar', accent: 'khaleeji', speed: 0.98, sampleRate: 44_100,
 });
 
-function parseSseAudio(body) {
+function parseSseResult(body) {
   const decoder = new TextDecoder();
-  const chunks = [];
+  const chunks = []; const timestamps = [];
   let pending = '';
   return (async () => {
     for await (const fragment of body) {
@@ -25,15 +25,24 @@ function parseSseAudio(body) {
         if (message.error || message.type === 'error') throw new Error('Cartesia TTS rejected the production request');
         const encoded = message.data || message.audio || message.chunk;
         if (typeof encoded === 'string') chunks.push(Buffer.from(encoded, 'base64'));
+        const wordTimestamps = message.word_timestamps || message.timestamps?.word_timestamps || [];
+        if (Array.isArray(wordTimestamps)) {
+          for (const word of wordTimestamps) {
+            const start = Number(word.start ?? word.start_time ?? word.offset);
+            const end = Number(word.end ?? word.end_time ?? word.offset_end);
+            const text = String(word.word ?? word.text ?? '').trim();
+            if (text && Number.isFinite(start) && Number.isFinite(end) && end >= start) timestamps.push({ text, start, end });
+          }
+        }
       }
     }
     const pcm = Buffer.concat(chunks);
     if (pcm.length < 2 || pcm.length % 2) throw new Error('Cartesia returned invalid production PCM');
-    return pcm;
+    return { pcm, timestamps: timestamps.sort((a, b) => a.start - b.start || a.end - b.end) };
   })();
 }
 
-export async function synthesizeWalidPcm({ config, text }) {
+export async function synthesizeWalidWithTimestamps({ config, text }) {
   if (!config.cartesiaVoiceId || !text?.trim()) throw new Error('Cartesia Walid configuration or speech text is missing');
   const apiKey = keychainSecret(config.cartesiaKeychainService, config.cartesiaKeychainAccount);
   const response = await fetch('https://api.cartesia.ai/tts/sse', {
@@ -47,11 +56,12 @@ export async function synthesizeWalidPcm({ config, text }) {
       output_format: { container: 'raw', encoding: 'pcm_s16le', sample_rate: WALID_PRODUCTION_PROFILE.sampleRate },
       language: WALID_PRODUCTION_PROFILE.language,
       accent: WALID_PRODUCTION_PROFILE.accent,
-      normalization: 'auto', add_timestamps: false, context_id: randomUUID(),
+      normalization: 'auto', add_timestamps: true, use_normalized_timestamps: true, context_id: randomUUID(),
       generation_config: { volume: 1, speed: WALID_PRODUCTION_PROFILE.speed },
     }),
   });
   if (!response.ok || !response.body) throw new Error(`Cartesia production TTS unavailable (${response.status})`);
-  return parseSseAudio(response.body);
+  return parseSseResult(response.body);
 }
+export async function synthesizeWalidPcm({ config, text }) { return (await synthesizeWalidWithTimestamps({ config, text })).pcm; }
 export async function writeTtsSample({ config, workspace, text }) { const pcm = await synthesizeWalidPcm({ config, text }); await mkdir(workspace, { recursive: true, mode: 0o700 }); const file = path.join(workspace, 'walid-sample.pcm'); await writeFile(file, pcm, { mode: 0o600 }); await chmod(file, 0o600); return { file, bytes: pcm.length }; }

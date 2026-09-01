@@ -47,9 +47,5 @@ export async function createLocalSendIntegrationCandidate({ store, config, conte
 }
 
 export async function renderRequestedRevision({ store, config, contentId }) {
-  const item = store.getContent(contentId); if (!item || item.state !== 'REVISING') throw new Error('No requested revision is ready to render');
-  const revision = store.getRevision(contentId, item.current_revision);
-  const revisedScript = { ...revision.script, caption: `${revision.script.caption} — نسخة أقصر` };
-  store.setRevisionPlan({ contentId, revisionNumber: item.current_revision, script: revisedScript, sources: revision.sources, actor: 'pipeline' });
-  return renderCurrent({ store, config, contentId, revisionNumber: item.current_revision });
+  throw new Error('NON_CANONICAL_REVISION_RENDERER_DISABLED: revisions must be dispatched through the canonical Cartesia/Remotion pipeline');
 }

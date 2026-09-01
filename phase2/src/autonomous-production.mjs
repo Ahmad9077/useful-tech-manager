@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { synthesizeWalidPcm, WALID_PRODUCTION_PROFILE } from './tts.mjs';
+import { synthesizeWalidWithTimestamps, WALID_PRODUCTION_PROFILE } from './tts.mjs';
 import { sha256, isoNow } from './util.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -32,7 +32,9 @@ export async function loadCanonicalQualityReference() {
   const required = [
     path.join(sourceProject, 'src', 'Root.tsx'),
     path.join(sourceProject, 'src', 'IphoneWebcam.tsx'),
+    path.join(sourceProject, 'src', 'design', 'UsefulTechSystem.tsx'),
     path.join(sourceProject, 'src', 'icons', 'IconFamilyV4.tsx'),
+    path.join(sourceProject, 'public', 'brand', 'useful-tech-logo.png'),
     path.join(sourceProject, 'public', 'audio', 'music-full.wav'),
     path.join(sourceProject, 'public', 'audio', 'sfx-success.wav'),
   ];
@@ -67,23 +69,55 @@ export async function writeVerifiedIphoneWebcamScript({ store, contentId, revisi
   return script;
 }
 
+const CAPTION_PLAN = Object.freeze([
+  { line1: 'كاميرا Mac مو بالمستوى؟', line2: 'حوّل iPhone إلى Webcam', words: 12, theme: 'DARK_NAVY' },
+  { line1: 'اسمها Continuity Camera', line2: 'وتجي من Apple بدون تطبيق إضافي', words: 14, theme: 'DARK_NAVY' },
+  { line1: 'ثبت iPhone قريب من Mac', line2: 'وخله مقفل والكاميرا الخلفية باتجاهك', words: 14, theme: 'DARK_NAVY' },
+  { line1: 'في FaceTime أو أي تطبيق كاميرا:', line2: 'اختر iPhone من إعدادات الفيديو', words: 16, theme: 'DARK_NAVY' },
+  { line1: 'تشتغل لاسلكياً أو عبر USB', line2: 'إذا تبغى تشحن iPhone أثناء الاستخدام', words: 12, theme: 'DARK_NAVY' },
+  { line1: 'تأكد من المتطلبات قبل تبدأ', line2: 'iPhone XR + iOS 16 و macOS Ventura', words: 16, theme: 'DARK_NAVY' },
+  { line1: 'نفس Apple Account', line2: 'وWi-Fi وBluetooth شغالين', words: 12, theme: 'DARK_NAVY' },
+  { line1: 'احفظ الاسم', line2: 'Continuity Camera', words: 99, theme: 'DARK_NAVY' },
+]);
+
+function buildAudioSyncedCaptionCues(timestamps) {
+  const words = timestamps.filter((word) => Number.isFinite(word.start) && Number.isFinite(word.end) && word.end >= word.start).sort((a, b) => a.start - b.start);
+  if (!words.length) throw new Error('CARTESIA_WORD_TIMESTAMPS_MISSING');
+  const cues = []; let cursor = 0;
+  for (let index = 0; index < CAPTION_PLAN.length && cursor < words.length; index += 1) {
+    const plan = CAPTION_PLAN[index];
+    const endIndex = index === CAPTION_PLAN.length - 1 ? words.length - 1 : Math.min(words.length - 1, cursor + plan.words - 1);
+    const start = Math.max(0, words[cursor].start - 0.03);
+    const end = Math.max(start + 0.45, words[endIndex].end + 0.14);
+    cues.push({ id: `cue-${index + 1}`, start, end, line1: plan.line1, line2: plan.line2, theme: plan.theme, sourceWordStart: cursor, sourceWordEnd: endIndex });
+    cursor = endIndex + 1;
+  }
+  if (cues.length < 6) throw new Error('CARTESIA_WORD_TIMESTAMPS_INSUFFICIENT');
+  return cues;
+}
+
 export async function generateWalidVoice({ config, workDir, narration }) {
   const voiceDir = path.join(workDir, 'voice'); await mkdir(voiceDir, { recursive: true, mode: 0o700 });
   const pcmPath = path.join(voiceDir, 'walid-production.pcm'); const wavPath = path.join(voiceDir, 'walid-production.wav');
-  await writeFile(pcmPath, await synthesizeWalidPcm({ config, text: narration }), { mode: 0o600 });
+  const synthesis = await synthesizeWalidWithTimestamps({ config, text: narration });
+  const captionCues = buildAudioSyncedCaptionCues(synthesis.timestamps);
+  const timestampsPath = path.join(voiceDir, 'caption-word-timestamps.json'); const cuesPath = path.join(voiceDir, 'caption-cues.json');
+  await writeFile(pcmPath, synthesis.pcm, { mode: 0o600 });
   await run('ffmpeg', ['-y', '-f', 's16le', '-ar', String(WALID_PRODUCTION_PROFILE.sampleRate), '-ac', '1', '-i', pcmPath, '-c:a', 'pcm_s16le', wavPath]);
   await writeFile(path.join(voiceDir, 'voice-production.json'), JSON.stringify(WALID_PRODUCTION_PROFILE, null, 2), { mode: 0o600 });
-  return wavPath;
+  await writeFile(timestampsPath, JSON.stringify({ provider: 'Cartesia', voice: 'Walid', timestamps: synthesis.timestamps }, null, 2), { mode: 0o600 });
+  await writeFile(cuesPath, JSON.stringify({ version: 'audio-synced-v1', cues: captionCues }, null, 2), { mode: 0o600 });
+  return { voicePath: wavPath, timestampsPath, cuesPath, captionCues };
 }
 
 export async function buildVisualWorkspace({ workDir }) {
   const visualDir = path.join(workDir, 'visuals'); await mkdir(visualDir, { recursive: true, mode: 0o700 });
   const reference = await loadCanonicalQualityReference();
-  await writeFile(path.join(visualDir, 'visual-system.json'), JSON.stringify({ ...reference, sourceProject, builtAt: isoNow() }, null, 2), { mode: 0o600 });
+  await writeFile(path.join(visualDir, 'visual-system.json'), JSON.stringify({ ...reference, sourceProject, builtAt: isoNow(), enforcement: { layers: ['background', 'support', 'device', 'active-foreground', 'captions', 'brand'], activeForegroundRequired: true, audioSyncedCaptionsRequired: true, trueRtlRequired: true, canonicalBrandBugRequired: true, adaptiveCaptionSurfaceRequired: true } }, null, 2), { mode: 0o600 });
   return visualDir;
 }
 
-export async function renderCanonicalIphoneWebcam({ workDir, voicePath, contentId }) {
+export async function renderCanonicalIphoneWebcam({ workDir, voicePath, contentId, captionCues }) {
   const reference = await loadCanonicalQualityReference();
   const renderDir = path.join(workDir, 'render'); await mkdir(renderDir, { recursive: true, mode: 0o700 });
   const publicVoice = path.join(sourceProject, 'public', 'audio', `pipeline-${contentId}.wav`);
@@ -91,7 +125,7 @@ export async function renderCanonicalIphoneWebcam({ workDir, voicePath, contentI
   const output = path.join(renderDir, 'iPhone-Webcam.mp4');
   await cp(voicePath, publicVoice);
   try {
-    await run(path.join(sourceProject, 'node_modules', '.bin', 'remotion'), ['render', 'src/index.ts', reference.composition, intermediate, '--props', JSON.stringify({ voiceSrc: `audio/pipeline-${contentId}.wav` }), '--codec', 'h264', '--crf', '14', '--pixel-format', 'yuv420p', '--audio-codec', 'aac', '--audio-bitrate', '192k'], { cwd: sourceProject });
+    await run(path.join(sourceProject, 'node_modules', '.bin', 'remotion'), ['render', 'src/index.ts', reference.composition, intermediate, '--props', JSON.stringify({ voiceSrc: `audio/pipeline-${contentId}.wav`, captionCues }), '--codec', 'h264', '--crf', '14', '--pixel-format', 'yuv420p', '--audio-codec', 'aac', '--audio-bitrate', '192k'], { cwd: sourceProject });
     await run('ffmpeg', ['-y', '-i', intermediate, '-c:v', 'libx264', '-preset', 'slow', '-crf', '16', '-pix_fmt', 'yuv420p', '-color_range', 'tv', '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-af', 'loudnorm=I=-14:TP=-1.5:LRA=7', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', output]);
   } finally { await rm(publicVoice, { force: true }); await rm(intermediate, { force: true }); }
   return output;

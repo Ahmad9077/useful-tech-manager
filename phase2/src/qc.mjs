@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdir, stat } from 'node:fs/promises';
+import { mkdir, stat, readFile, access } from 'node:fs/promises';
 import path from 'node:path';
 
 function run(command, args) {
@@ -40,4 +40,48 @@ export async function visualQc(file, { framesDir, sceneTimes = [0, 1, 2, 7, 13, 
   const frozen = await run('ffmpeg', ['-v', 'info', '-i', file, '-vf', 'freezedetect=n=0.001:d=1.5', '-an', '-f', 'null', '-']);
   const blackEvents = (black.error.match(/black_start:/g) || []).length; const frozenEvents = (frozen.error.match(/freeze_start:/g) || []).length;
   return { pass: blackEvents === 0 && frozenEvents === 0, technical, frames, blackEvents, frozenEvents, reason: blackEvents || frozenEvents ? 'BLACK_OR_FROZEN_OUTPUT' : null };
+}
+
+function asWords(raw) { return Array.isArray(raw?.timestamps) ? raw.timestamps.filter((word) => Number.isFinite(Number(word.start)) && Number.isFinite(Number(word.end))) : []; }
+export async function captionSyncQc({ cues, timestampsPath }) {
+  const words = asWords(JSON.parse(await readFile(timestampsPath, 'utf8'))).sort((a, b) => Number(a.start) - Number(b.start));
+  const issues = []; const list = Array.isArray(cues) ? cues : [];
+  if (!words.length) issues.push('NO_FINAL_NARRATION_WORD_TIMESTAMPS');
+  if (!list.length) issues.push('NO_CAPTION_CUES');
+  let previousEnd = -1;
+  for (const cue of list) {
+    if (!Number.isFinite(cue.start) || !Number.isFinite(cue.end) || cue.end <= cue.start) issues.push(`INVALID_CUE:${cue.id || 'unknown'}`);
+    if (cue.start < previousEnd - 0.05) issues.push(`OVERLAPPING_CUE:${cue.id || 'unknown'}`);
+    const sourceStart = words[cue.sourceWordStart]; const sourceEnd = words[cue.sourceWordEnd];
+    if (!sourceStart || !sourceEnd) issues.push(`CUE_WORD_REFERENCE_MISSING:${cue.id || 'unknown'}`);
+    else {
+      if (Math.abs(Number(cue.start) - Math.max(0, Number(sourceStart.start) - 0.03)) > 0.08) issues.push(`EARLY_OR_LATE_CAPTION:${cue.id}`);
+      if (Math.abs(Number(cue.end) - Math.max(Number(cue.start) + 0.45, Number(sourceEnd.end) + 0.14)) > 0.12) issues.push(`PERSISTENCE_MISMATCH:${cue.id}`);
+    }
+    previousEnd = cue.end;
+  }
+  const speechEnd = words.length ? Number(words.at(-1).end) : 0;
+  if (list.length && Number(list.at(-1).end) > speechEnd + 0.4) issues.push('CAPTIONS_PERSIST_AFTER_SPEECH');
+  return { pass: issues.length === 0, cueCount: list.length, wordCount: words.length, speechEnd, issues, source: 'final-cartesia-word-timestamps' };
+}
+
+const forbiddenBidiControls = /[\u202A-\u202E\u2066-\u2068]/;
+export async function usefulTechDesignQc({ sourceProject, visualSystemPath, cues }) {
+  const [composition, system] = await Promise.all([
+    readFile(path.join(sourceProject, 'src', 'IphoneWebcam.tsx'), 'utf8'),
+    readFile(path.join(sourceProject, 'src', 'design', 'UsefulTechSystem.tsx'), 'utf8'),
+  ]);
+  const manifest = JSON.parse(await readFile(visualSystemPath, 'utf8'));
+  const issues = []; const mixed = (cues || []).filter((cue) => /[\u0600-\u06FF]/.test(`${cue.line1} ${cue.line2 || ''}`) && /[A-Za-z]/.test(`${cue.line1} ${cue.line2 || ''}`));
+  if (!composition.includes('<BrandBug/>') || !system.includes("staticFile('brand/useful-tech-logo.png')")) issues.push('MISSING_CANONICAL_BRAND_BUG');
+  if (composition.includes('@useful.tech.ar') || composition.includes('TikTok')) issues.push('BRAND_GROUPED_WITH_PLATFORM_UI');
+  if (!system.includes('top:64') || !system.includes("left:'50%'")) issues.push('BRAND_SAFE_PLACEMENT_INVALID');
+  if (!composition.includes('<ActiveConcept/>') || !system.includes('zIndex:70')) issues.push('ACTIVE_ICON_NOT_FOREGROUND');
+  if (!composition.includes('<CaptionRail cues={captionCues}/>') || !system.includes('AudioSyncedCaption')) issues.push('AUDIO_SYNCED_CAPTIONS_NOT_USED');
+  if (!system.includes('dir="rtl"') || !system.includes('<bdi') || !system.includes("unicodeBidi:'isolate'")) issues.push('RTL_BIDI_RENDERER_INVALID');
+  if (forbiddenBidiControls.test(composition) || forbiddenBidiControls.test(system) || mixed.some((cue) => forbiddenBidiControls.test(`${cue.line1}${cue.line2 || ''}`))) issues.push('FORBIDDEN_BIDI_CONTROL_FOUND');
+  if (!system.includes('DARK_NAVY') || !system.includes('LIGHT_IVORY') || !system.includes('TEAL') || !system.includes('background:theme.surface')) issues.push('ADAPTIVE_CAPTION_SURFACE_INVALID');
+  if (!manifest.enforcement?.activeForegroundRequired || !manifest.enforcement?.audioSyncedCaptionsRequired || !manifest.enforcement?.trueRtlRequired || !manifest.enforcement?.canonicalBrandBugRequired || !manifest.enforcement?.adaptiveCaptionSurfaceRequired) issues.push('DESIGN_ENFORCEMENT_MANIFEST_INVALID');
+  try { await access(path.join(sourceProject, 'public', 'brand', 'useful-tech-logo.png')); } catch { issues.push('CANONICAL_LOGO_ASSET_MISSING'); }
+  return { pass: issues.length === 0, issues, mixedCaptionCount: mixed.length, foreground: !issues.includes('ACTIVE_ICON_NOT_FOREGROUND'), brand: !issues.some((issue) => issue.startsWith('MISSING_CANONICAL') || issue.startsWith('BRAND_') || issue === 'CANONICAL_LOGO_ASSET_MISSING'), rtl: !issues.some((issue) => issue.includes('RTL') || issue.includes('BIDI')), captionSurface: !issues.includes('ADAPTIVE_CAPTION_SURFACE_INVALID') };
 }

@@ -10,10 +10,9 @@ import { parseJson, isoNow, redact } from './util.mjs';
 import { archiveApproved } from './archive.mjs';
 import { TikTokAdapter, OfficialTikTokSandboxClient } from './tiktok.mjs';
 import { sandboxAccessTokenProvider } from './sandbox-token.mjs';
-import { renderRequestedRevision } from './pipeline.mjs';
 import { randomId } from './util.mjs';
 import { CANONICAL_TOPIC, researchIphoneWebcam, writeVerifiedIphoneWebcamScript, generateWalidVoice, buildVisualWorkspace, renderCanonicalIphoneWebcam, artifactHash } from './autonomous-production.mjs';
-import { inspectMp4, visualQc } from './qc.mjs';
+import { inspectMp4, visualQc, captionSyncQc, usefulTechDesignQc } from './qc.mjs';
 import { AUTOMATED_STAGES } from './store.mjs';
 
 export class Phase2Service {
@@ -53,7 +52,13 @@ export class Phase2Service {
       if (job.kind === 'DISCOVER_IDEAS') { const signals = await this.discovery.discover(); this.store.audit('DISCOVERY_COMPLETED', 'scheduler', { sourceCount: signals.length }); }
       else if (job.kind === 'RUN_STAGE') next = await this.runStage(job, parseJson(job.payload_json));
       else if (job.kind === 'RUN_CONTENT_PIPELINE') next = this.queueStageForLegacyPipeline(parseJson(job.payload_json));
-      else if (job.kind === 'RENDER_REVISION') { const result = await renderRequestedRevision({ store: this.store, config: this.config, contentId: parseJson(job.payload_json).contentId }); await this.sendReady(result.content, result.revision, result.output.qc.duration); }
+      else if (job.kind === 'RENDER_REVISION') {
+        const { contentId } = parseJson(job.payload_json); const item = this.store.getContent(contentId);
+        if (!item || item.state !== 'REVISING') throw new Error('No requested canonical revision is ready to render');
+        // Every revision uses the same production-grade Cartesia/Remotion/QC chain.
+        // The historical LocalSend test renderer is intentionally never a fallback.
+        next = this.queueNextStage(contentId, item.current_revision, 'GENERATING_VOICE');
+      }
       else if (job.kind === 'PUBLISH_APPROVED') await this.publishApproved(parseJson(job.payload_json));
       else if (job.kind === 'POLL_PUBLISH_STATUS') await this.pollPublishStatus(parseJson(job.payload_json));
       this.scheduler.finish(job.id, null, this.workerId);
@@ -118,10 +123,24 @@ export class Phase2Service {
     else if (stage === 'FACT_CHECKING') { const sources = this.store.db.prepare('SELECT url,title,retrieved_at AS retrievedAt,claims_json FROM research_sources WHERE content_id=?').all(contentId).map((row) => ({ url: row.url, title: row.title, retrievedAt: row.retrievedAt, claims: parseJson(row.claims_json) })); if (sources.length < 2) throw new Error('RESEARCH_SOURCE_UNAVAILABLE'); nextStage = 'SELECTING_IDEA'; }
     else if (stage === 'SELECTING_IDEA') { this.store.db.prepare('UPDATE content_items SET topic=?,category=?,selected_hook=?,hook_type=?,updated_at=? WHERE content_id=?').run(CANONICAL_TOPIC.topic, CANONICAL_TOPIC.category, CANONICAL_TOPIC.hook, CANONICAL_TOPIC.hookType, isoNow(), contentId); nextStage = 'WRITING_SCRIPT'; }
     else if (stage === 'WRITING_SCRIPT') { const sources = this.store.db.prepare('SELECT url,title,retrieved_at AS retrievedAt,claims_json FROM research_sources WHERE content_id=?').all(contentId).map((row) => ({ url: row.url, title: row.title, retrievedAt: row.retrievedAt, claims: parseJson(row.claims_json) })); if (item.state === 'RESEARCHING') this.store.transition(contentId, 'SCRIPTING', 'pipeline'); await writeVerifiedIphoneWebcamScript({ store: this.store, contentId, revisionNumber, sources }); nextStage = 'GENERATING_VOICE'; }
-    else if (stage === 'GENERATING_VOICE') { const revision = this.store.getRevision(contentId, revisionNumber); const voice = await generateWalidVoice({ config: this.config, workDir, narration: revision.script.narration }); await writeFile(path.join(workDir, 'voice-path.txt'), voice, { mode: 0o600 }); if (this.store.getContent(contentId).state === 'SCRIPTING') this.store.transition(contentId, 'PRODUCING', 'pipeline'); nextStage = 'BUILDING_VISUALS'; }
+    else if (stage === 'GENERATING_VOICE') {
+      const revision = this.store.getRevision(contentId, revisionNumber); const voice = await generateWalidVoice({ config: this.config, workDir, narration: revision.script.narration });
+      await writeFile(path.join(workDir, 'voice-path.txt'), voice.voicePath, { mode: 0o600 });
+      this.store.setRevisionPlan({ contentId, revisionNumber, script: { ...revision.script, captionCues: voice.captionCues, captionTiming: { source: 'Cartesia final narration word timestamps', timestampsPath: voice.timestampsPath, cuesPath: voice.cuesPath, invalidatedOnTtsChange: true } }, sources: revision.sources, actor: 'audio-synced-caption-generator' });
+      if (this.store.getContent(contentId).state === 'REVISING') this.store.transition(contentId, 'SCRIPTING', 'design-rule-revision');
+      if (this.store.getContent(contentId).state === 'SCRIPTING') this.store.transition(contentId, 'PRODUCING', 'pipeline'); nextStage = 'BUILDING_VISUALS';
+    }
     else if (stage === 'BUILDING_VISUALS') { await buildVisualWorkspace({ workDir }); nextStage = 'RENDERING'; }
-    else if (stage === 'RENDERING') { const voice = (await (await import('node:fs/promises')).readFile(path.join(workDir, 'voice-path.txt'), 'utf8')).trim(); const artifact = await renderCanonicalIphoneWebcam({ workDir, voicePath: voice, contentId }); const qc = await inspectMp4(artifact); if (!qc.pass) throw new Error('RENDER_QC_FAILED'); this.store.setRevisionArtifact({ contentId, revisionNumber, artifactPath: artifact, artifactSha256: await artifactHash(artifact), settings: { title: this.store.getRevision(contentId, revisionNumber).script.caption, hashtags: this.store.getRevision(contentId, revisionNumber).script.hashtags, privacy: 'SELF_ONLY', allowComment: false, allowDuet: false, allowStitch: false, brandedContent: false, yourBrand: false }, qc, actor: 'canonical-autonomous-renderer' }); nextStage = 'QC'; }
-    else if (stage === 'QC') { const revision = this.store.getRevision(contentId, revisionNumber); const qc = await visualQc(revision.artifact_path, { framesDir: path.join(workDir, 'qc-frames') }); if (!qc.pass) throw new Error(`RENDER_VISUAL_QC_FAILED:${qc.reason || 'unknown'}`); this.store.setRevisionArtifact({ contentId, revisionNumber, artifactPath: revision.artifact_path, artifactSha256: revision.artifact_sha256, settings: revision.settings, qc, actor: 'canonical-visual-qc' }); const contentState = this.store.getContent(contentId).state; if (contentState === 'PRODUCING') this.store.transition(contentId, 'QC', 'pipeline'); if (this.store.getContent(contentId).state === 'QC') this.store.transition(contentId, 'READY_FOR_REVIEW', 'pipeline'); await this.sendReady(this.store.getContent(contentId), this.store.getRevision(contentId, revisionNumber), qc.technical.duration); this.store.updateProgress({ contentId, stage: 'READY_FOR_REVIEW', workerStatus: 'WAITING', jobId: null, waitingReason: 'WAITING_FOR_USER_APPROVAL', waitingSince: isoNow(), lastSuccessfulStep: 'Technical and visual QC passed; MP4 delivered' }); this.store.audit('READY_FOR_REVIEW_DELIVERED', 'pipeline', { contentId, revisionNumber }); return null; }
+    else if (stage === 'RENDERING') { const revision = this.store.getRevision(contentId, revisionNumber); const voice = (await (await import('node:fs/promises')).readFile(path.join(workDir, 'voice-path.txt'), 'utf8')).trim(); const artifact = await renderCanonicalIphoneWebcam({ workDir, voicePath: voice, contentId, captionCues: revision.script.captionCues }); const qc = await inspectMp4(artifact); if (!qc.pass) throw new Error('RENDER_QC_FAILED'); this.store.setRevisionArtifact({ contentId, revisionNumber, artifactPath: artifact, artifactSha256: await artifactHash(artifact), settings: { title: revision.script.caption, hashtags: revision.script.hashtags, privacy: 'SELF_ONLY', allowComment: false, allowDuet: false, allowStitch: false, brandedContent: false, yourBrand: false }, qc, actor: 'canonical-autonomous-renderer' }); nextStage = 'QC'; }
+    else if (stage === 'QC') {
+      const revision = this.store.getRevision(contentId, revisionNumber); const cues = revision.script.captionCues;
+      const captionSync = await captionSyncQc({ cues, timestampsPath: revision.script.captionTiming?.timestampsPath });
+      const design = await usefulTechDesignQc({ sourceProject: (await import('./autonomous-production.mjs')).sourceProject, visualSystemPath: path.join(workDir, 'visuals', 'visual-system.json'), cues });
+      const visual = await visualQc(revision.artifact_path, { framesDir: path.join(workDir, 'qc-frames'), sceneTimes: [0, 1, 2, ...cues.map((cue) => Math.min(cue.end - 0.08, cue.start + 0.22))] });
+      const qc = { ...visual, captionSync, design, pass: visual.pass && captionSync.pass && design.pass };
+      if (!qc.pass) throw new Error(`RENDER_VISUAL_QC_FAILED:${qc.reason || captionSync.issues?.[0] || design.issues?.[0] || 'unknown'}`);
+      this.store.setRevisionArtifact({ contentId, revisionNumber, artifactPath: revision.artifact_path, artifactSha256: revision.artifact_sha256, settings: revision.settings, qc, actor: 'canonical-visual-qc' }); const contentState = this.store.getContent(contentId).state; if (contentState === 'PRODUCING') this.store.transition(contentId, 'QC', 'pipeline'); if (this.store.getContent(contentId).state === 'QC') this.store.transition(contentId, 'READY_FOR_REVIEW', 'pipeline'); await this.sendReady(this.store.getContent(contentId), this.store.getRevision(contentId, revisionNumber), qc.technical.duration); this.store.updateProgress({ contentId, stage: 'READY_FOR_REVIEW', workerStatus: 'WAITING', jobId: null, waitingReason: 'WAITING_FOR_USER_APPROVAL', waitingSince: isoNow(), lastSuccessfulStep: 'Technical, visual, RTL, brand, foreground, and audio-sync QC passed; MP4 delivered' }); this.store.audit('READY_FOR_REVIEW_DELIVERED', 'pipeline', { contentId, revisionNumber }); return null;
+    }
     this.store.updateProgress({ contentId, stage, workerStatus: 'RUNNING', jobId: job.id, lastSuccessfulStep: `${stage} complete` });
     return this.queueNextStage(contentId, revisionNumber, nextStage);
   }
