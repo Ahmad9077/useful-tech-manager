@@ -79,6 +79,7 @@ export async function usefulTechDesignQc({ sourceProject, visualSystemPath, cues
   if (!system.includes('TikTokAccountBug') || !system.includes('@useful.tech.ar') || !system.includes('TikTokMark')) issues.push('MISSING_TIKTOK_ACCOUNT_IDENTIFIER');
   if (!system.includes('top:68') || !system.includes('top:136') || !system.includes('left:58')) issues.push('BRAND_SAFE_PLACEMENT_INVALID');
   if (!composition.includes('<ActiveConcept/>') || !system.includes('zIndex:105')) issues.push('ACTIVE_ICON_NOT_FOREGROUND');
+  if (!composition.includes('zIndex:80') || !composition.includes('RequirementCard')) issues.push('FOREGROUND_REQUIREMENT_CARDS_MISSING');
   if (!composition.includes('<CaptionRail cues={captionCues}/>') || !system.includes('AudioSyncedCaption')) issues.push('AUDIO_SYNCED_CAPTIONS_NOT_USED');
   if (!system.includes('dir="rtl"') || !system.includes('<bdi') || !system.includes("unicodeBidi:'isolate'")) issues.push('RTL_BIDI_RENDERER_INVALID');
   if (forbiddenBidiControls.test(composition) || forbiddenBidiControls.test(system) || mixed.some((cue) => forbiddenBidiControls.test(`${cue.line1}${cue.line2 || ''}`))) issues.push('FORBIDDEN_BIDI_CONTROL_FOUND');
