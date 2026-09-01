@@ -92,7 +92,7 @@ export async function renderCanonicalIphoneWebcam({ workDir, voicePath, contentI
   await cp(voicePath, publicVoice);
   try {
     await run(path.join(sourceProject, 'node_modules', '.bin', 'remotion'), ['render', 'src/index.ts', reference.composition, intermediate, '--props', JSON.stringify({ voiceSrc: `audio/pipeline-${contentId}.wav` }), '--codec', 'h264', '--crf', '14', '--pixel-format', 'yuv420p', '--audio-codec', 'aac', '--audio-bitrate', '192k'], { cwd: sourceProject });
-    await run('ffmpeg', ['-y', '-i', intermediate, '-c:v', 'libx264', '-preset', 'slow', '-crf', '16', '-pix_fmt', 'yuv420p', '-color_range', 'tv', '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', output]);
+    await run('ffmpeg', ['-y', '-i', intermediate, '-c:v', 'libx264', '-preset', 'slow', '-crf', '16', '-pix_fmt', 'yuv420p', '-color_range', 'tv', '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-af', 'loudnorm=I=-14:TP=-1.5:LRA=7', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', output]);
   } finally { await rm(publicVoice, { force: true }); await rm(intermediate, { force: true }); }
   return output;
 }
