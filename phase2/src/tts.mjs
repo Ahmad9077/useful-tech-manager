@@ -26,7 +26,14 @@ function parseSseResult(body) {
         const encoded = message.data || message.audio || message.chunk;
         if (typeof encoded === 'string') chunks.push(Buffer.from(encoded, 'base64'));
         const wordTimestamps = message.word_timestamps || message.timestamps?.word_timestamps || [];
-        if (Array.isArray(wordTimestamps)) {
+        // Cartesia SSE returns parallel arrays: { words: [], start: [], end: [] }.
+        // Keep object-array support as a compatibility guard for older responses.
+        if (wordTimestamps && Array.isArray(wordTimestamps.words) && Array.isArray(wordTimestamps.start) && Array.isArray(wordTimestamps.end)) {
+          for (let index = 0; index < wordTimestamps.words.length; index += 1) {
+            const text = String(wordTimestamps.words[index] ?? '').trim(); const start = Number(wordTimestamps.start[index]); const end = Number(wordTimestamps.end[index]);
+            if (text && Number.isFinite(start) && Number.isFinite(end) && end >= start) timestamps.push({ text, start, end });
+          }
+        } else if (Array.isArray(wordTimestamps)) {
           for (const word of wordTimestamps) {
             const start = Number(word.start ?? word.start_time ?? word.offset);
             const end = Number(word.end ?? word.end_time ?? word.offset_end);
