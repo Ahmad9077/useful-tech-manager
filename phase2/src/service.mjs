@@ -61,6 +61,13 @@ export class Phase2Service {
     } catch (error) {
       const message = redact(error.message);
       const payload = parseJson(job.payload_json);
+      // A superseded revision may finish/throw after a quality replacement. It is
+      // obsolete work, never a failure of the current revision.
+      if (job.kind === 'RUN_STAGE' && payload.contentId && payload.revisionNumber && this.store.getContent(payload.contentId)?.current_revision !== Number(payload.revisionNumber)) {
+        this.scheduler.finish(job.id, 'STALE_SUPERSEDED_REVISION', this.workerId);
+        this.store.audit('STALE_JOB_IGNORED', 'service', { contentId: payload.contentId, revisionNumber: payload.revisionNumber, currentRevision: this.store.getContent(payload.contentId)?.current_revision });
+        return;
+      }
       if (job.kind === 'RUN_STAGE' && payload.contentId) {
         const attempt = Number(job.attempts || 1); const transient = /TEMPORARY|timeout|network|fetch failed|Cartesia|RESEARCH_SOURCE_UNAVAILABLE/i.test(message);
         if (transient && attempt < 3) {

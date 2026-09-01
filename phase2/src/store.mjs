@@ -186,6 +186,9 @@ export class Store {
       const now = isoNow(); const prior = item.current_revision; const next = prior + 1;
       this.db.prepare('UPDATE content_revisions SET status=?,qc_pass=0,superseded_at=? WHERE content_id=? AND revision_number=?').run('QUALITY_REJECTED', now, contentId, prior);
       this.db.prepare('UPDATE approvals SET invalidated_at=? WHERE content_id=? AND invalidated_at IS NULL').run(now, contentId);
+      // Research evidence belongs to a candidate revision, never to its rejected predecessor.
+      this.db.prepare('DELETE FROM research_sources WHERE content_id=?').run(contentId);
+      this.db.prepare("UPDATE workflow_jobs SET status='FAILED',error_code='SUPERSEDED_QUALITY_REVISION',lease_until=NULL,updated_at=? WHERE kind='RUN_STAGE' AND status IN ('QUEUED','CLAIMED') AND payload_json LIKE ? AND payload_json LIKE ?").run(now, `%\"contentId\":\"${contentId}\"%`, `%\"revisionNumber\":${prior}%`);
       this.db.prepare('INSERT INTO content_revisions(content_id,revision_number,created_at,status) VALUES(?,?,?,?)').run(contentId, next, now, 'WORKING');
       this.db.prepare('UPDATE content_items SET topic=?,category=?,selected_hook=?,hook_type=?,current_revision=?,state=?,updated_at=? WHERE content_id=?').run(topic || item.topic, category || item.category, hook || '', hookType || 'quality-replacement', next, 'REVISING', now, contentId);
       this.db.prepare('UPDATE content_progress SET current_stage=?,worker_status=?,job_id=NULL,updated_at=?,last_successful_step=?,last_error=NULL,worker_id=NULL,claimed_at=NULL,heartbeat_at=NULL,lease_expires_at=NULL,waiting_reason=NULL,waiting_since=NULL,next_retry_at=NULL,attempt_count=0 WHERE content_id=?').run('RESEARCHING', 'QUEUED', now, `Revision ${prior} quality rejected; fresh research queued`, contentId);
