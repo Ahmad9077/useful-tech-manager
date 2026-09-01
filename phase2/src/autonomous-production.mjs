@@ -92,6 +92,9 @@ function buildAudioSyncedCaptionCues(timestamps) {
     cues.push({ id: `cue-${index + 1}`, start, end, line1: plan.line1, line2: plan.line2, theme: plan.theme, sourceWordStart: cursor, sourceWordEnd: endIndex });
     cursor = endIndex + 1;
   }
+  // Never show two caption cards at once. If Cartesia's adjacent word timing
+  // overlaps slightly, the new spoken phrase wins at its actual start.
+  for (let index = 0; index < cues.length - 1; index += 1) cues[index].end = Math.min(cues[index].end, Math.max(cues[index].start + 0.45, cues[index + 1].start - 0.02));
   if (cues.length < 6) throw new Error('CARTESIA_WORD_TIMESTAMPS_INSUFFICIENT');
   return cues;
 }

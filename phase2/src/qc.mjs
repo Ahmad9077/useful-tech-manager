@@ -56,7 +56,9 @@ export async function captionSyncQc({ cues, timestampsPath }) {
     if (!sourceStart || !sourceEnd) issues.push(`CUE_WORD_REFERENCE_MISSING:${cue.id || 'unknown'}`);
     else {
       if (Math.abs(Number(cue.start) - Math.max(0, Number(sourceStart.start) - 0.03)) > 0.08) issues.push(`EARLY_OR_LATE_CAPTION:${cue.id}`);
-      if (Math.abs(Number(cue.end) - Math.max(Number(cue.start) + 0.45, Number(sourceEnd.end) + 0.14)) > 0.12) issues.push(`PERSISTENCE_MISMATCH:${cue.id}`);
+      // A cue may cut at the next cue's actual spoken start; it must never
+      // persist materially after the final word it represents.
+      if (Number(cue.end) + 0.12 < Number(sourceEnd.end) || Number(cue.end) > Number(sourceEnd.end) + 0.16) issues.push(`PERSISTENCE_MISMATCH:${cue.id}`);
     }
     previousEnd = cue.end;
   }
