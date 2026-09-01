@@ -16,7 +16,7 @@ const canTransition = new Map([
   ['QC', new Set(['READY_FOR_REVIEW', 'REVISING', 'FAILED'])],
   ['READY_FOR_REVIEW', new Set(['REVISION_REQUESTED', 'APPROVED', 'REJECTED', 'SKIPPED', 'FAILED'])],
   ['REVISION_REQUESTED', new Set(['REVISING', 'REJECTED', 'SKIPPED'])],
-  ['REVISING', new Set(['QC', 'FAILED'])],
+  ['REVISING', new Set(['RESEARCHING', 'QC', 'FAILED'])],
   ['APPROVED', new Set(['ARCHIVED', 'PUBLISHING', 'REVISION_REQUESTED', 'FAILED'])],
   ['ARCHIVED', new Set(['PUBLISHING', 'REVISION_REQUESTED', 'FAILED'])],
   ['PUBLISHING', new Set(['PUBLISHED', 'APPROVED', 'FAILED'])],
@@ -179,6 +179,21 @@ export class Store {
       this.audit('REVISION_REQUESTED', actor, { contentId, revisionNumber: next, reason: String(reason).slice(0, 500) }); return this.getContent(contentId);
     });
   }
+  replaceWithQualityRevision(contentId, { topic, category, hook, hookType, reason = 'QUALITY_REJECTED' } = {}) {
+    return this.transaction(() => {
+      const item = this.getContent(contentId); if (!item) throw new Error('Unknown content');
+      if (!['READY_FOR_REVIEW', 'REVISION_REQUESTED', 'REVISING', 'FAILED'].includes(item.state)) throw new Error('Quality replacement requires a reviewable current revision');
+      const now = isoNow(); const prior = item.current_revision; const next = prior + 1;
+      this.db.prepare('UPDATE content_revisions SET status=?,qc_pass=0,superseded_at=? WHERE content_id=? AND revision_number=?').run('QUALITY_REJECTED', now, contentId, prior);
+      this.db.prepare('UPDATE approvals SET invalidated_at=? WHERE content_id=? AND invalidated_at IS NULL').run(now, contentId);
+      this.db.prepare('INSERT INTO content_revisions(content_id,revision_number,created_at,status) VALUES(?,?,?,?)').run(contentId, next, now, 'WORKING');
+      this.db.prepare('UPDATE content_items SET topic=?,category=?,selected_hook=?,hook_type=?,current_revision=?,state=?,updated_at=? WHERE content_id=?').run(topic || item.topic, category || item.category, hook || '', hookType || 'quality-replacement', next, 'REVISING', now, contentId);
+      this.db.prepare('UPDATE content_progress SET current_stage=?,worker_status=?,job_id=NULL,updated_at=?,last_successful_step=?,last_error=NULL,worker_id=NULL,claimed_at=NULL,heartbeat_at=NULL,lease_expires_at=NULL,waiting_reason=NULL,waiting_since=NULL,next_retry_at=NULL,attempt_count=0 WHERE content_id=?').run('RESEARCHING', 'QUEUED', now, `Revision ${prior} quality rejected; fresh research queued`, contentId);
+      this.audit('QUALITY_REJECTED', 'quality-gate', { contentId, revisionNumber: prior, reason });
+      this.audit('QUALITY_REPLACEMENT_CREATED', 'quality-gate', { contentId, revisionNumber: next, replacesRevision: prior, topic: topic || item.topic });
+      return this.getContent(contentId);
+    });
+  }
   approveExact({ contentId, revisionNumber, fingerprint, userId, chatId, expectedUserId, expectedChatId, source = 'telegram-button', environment = 'sandbox' }) {
     return this.transaction(() => {
       if (!secureEqual(String(userId), String(expectedUserId)) || !secureEqual(String(chatId), String(expectedChatId))) throw new Error('Unauthorized Telegram sender');
@@ -222,6 +237,11 @@ export class Store {
     return { inserted: Boolean(result.changes), job };
   }
   queueOutbox(kind, payload, idempotencyKey) { const now = isoNow(); this.db.prepare('INSERT OR IGNORE INTO outbox VALUES(?,?,?,?,?,?,?,?,?,?)').run(randomId(), kind, json(payload), 'QUEUED', 0, now, idempotencyKey, now, now, null); }
+  queueTerminalFailureOnce(contentId) {
+    const key = `pipeline-terminal-failure:${contentId}`;
+    this.queueOutbox('message', { text: 'تعذر إكمال الفيديو بعد استنفاد المحاولات التلقائية. تم حفظ التقدم ولم يتم نشر أي شيء.' }, key);
+    return key;
+  }
   listContent(limit = 50) { return this.db.prepare('SELECT * FROM content_items ORDER BY updated_at DESC LIMIT ?').all(limit); }
   listPublicContent(limit = 50) {
     return this.db.prepare("SELECT c.*,p.environment AS publication_environment,p.visibility AS publication_visibility FROM content_items c JOIN content_publication_classification p ON p.content_id=c.content_id WHERE p.environment='production' AND p.visibility='PUBLIC' AND c.state='PUBLISHED' ORDER BY c.updated_at DESC LIMIT ?").all(limit);
