@@ -56,7 +56,7 @@ export async function researchIphoneWebcam({ store, contentId }) {
 
 export async function writeVerifiedIphoneWebcamScript({ store, contentId, revisionNumber, sources }) {
   // Tashkeel below is intentionally narration-only. Captions use normal Arabic and Latin product names.
-  const narration = `إِذَا كَامِيرَة المَاك مَو بِالمُسْتَوَى، لَا تَشْتَرِي Webcam قَبْل مَا تُجَرِّب هالحَرْكَة.\n\nإِذَا عِنْدَكَ iPhone وَMac، تِقْدَر تِخَلِّي كَامِيرَة iPhone هِي Webcam لِلمَاك بِمِيزَة Continuity Camera.\n\nثَبِّت iPhone قَرِيب مِن Mac، وَخَلِّه مَقْفُول وَالكَامِيرَة الخَلْفِيَّة بَاتِّجَاهَك. بَعْدَهَا اِفْتَح FaceTime، أَو أَيّ تَطْبِيق يَدْعَم الكَامِيرَا، وَاخْتَر iPhone مِن إِعْدَادَات الفِيدْيُو.\n\nتِشْتَغِل لَا سِلْكِيًّا، أَو بِسِلْك USB إِذَا تِبْغَى تِشْحَن iPhone.\n\nوَقَبْل تَبْدَا: لَازِم iPhone XR أَو أَحْدَث مَع iOS 16، وَMac يَدْعَم macOS Ventura. وَالجِهَازَيْن عَلَى نَفْس Apple Account، مَع وَايْ فَايْ وَBluetooth شَغَّالِينَ.\n\nاِحْفَظ اِسْم المِيزَة: Continuity Camera.`;
+  const narration = `إِذَا كَامِيرَة المَاك مَو بِالمُسْتَوَى، لَا تَشْتَرِي Webcam قَبْل مَا تُجَرِّب هالحَرْكَة.\n\nإِذَا عِنْدَكَ iPhone وَMac، تِقْدَر تِخَلِّي كَامِيرَة iPhone هِي Webcam لِلمَاك بِمِيزَة Continuity Camera.\n\nثَبِّت iPhone قَرِيب مِن Mac، وَخَلِّه مَقْفُول وَالكَامِيرَة الخَلْفِيَّة بَاتِّجَاهَك. بَعْدَهَا اِفْتَح FaceTime، أَو أَيّ تَطْبِيق يَدْعَم الكَامِيرَا، وَاخْتَر iPhone مِن إِعْدَادَات الفِيدْيُو.\n\nتِشْتَغِل لَا سِلْكِيًّا، أَو بِسِلْك USB إِذَا تِبْغَى تِشْحَن iPhone.\n\nوَقَبْل تَبْدَا: لَازِم iPhone XR أَو أَحْدَث مَع iOS 16، وَMac يَدْعَم macOS Ventura. وَالجِهَازَيْن عَلَى نَفْس Apple Account، مَع Wi-Fi وَBluetooth شَغَّالِينَ.\n\nاِحْفَظ الفِيدْيُو، وَجَرِّبها وَعَطْنا رَأْيَك.`;
   const script = {
     narration,
     caption: 'حوّل iPhone إلى Webcam للـ Mac',
@@ -80,7 +80,7 @@ const CAPTION_PLAN = Object.freeze([
   { line1: 'تشتغل لاسلكياً أو بسلك USB', line2: 'إذا تبغى تشحن iPhone', start: ['تِشْتَغِل', 'لَا'], end: ['iPhone'], theme: 'DARK_NAVY' },
   { line1: 'iPhone XR أو أحدث مع iOS 16', line2: 'و Mac يدعم macOS Ventura', start: ['لَازِم', 'iPhone'], end: ['Ventura'], theme: 'DARK_NAVY' },
   { line1: 'نفس Apple Account', line2: 'و Wi-Fi و Bluetooth شغالين', start: ['وَالجِهَازَيْن', 'عَلَى'], end: ['شَغَّالِينَ'], theme: 'DARK_NAVY' },
-  { line1: 'احفظ الاسم', line2: 'Continuity Camera', start: ['اِحْفَظ', 'اِسْم'], end: ['Camera'], theme: 'DARK_NAVY' },
+  { line1: 'احفظ الفيديو', line2: 'وجربها وعطنا رأيك', start: ['اِحْفَظ', 'الفِيدْيُو'], end: ['رَأْيَك'], theme: 'DARK_NAVY' },
 ]);
 
 const normalizeTimestampToken = (value) => String(value || '')
@@ -93,8 +93,21 @@ const normalizeTimestampToken = (value) => String(value || '')
 
 function findPhrase(words, phrase, fromIndex) {
   const targets = phrase.map(normalizeTimestampToken).filter(Boolean);
+  const compactTarget = targets.join('');
   for (let index = fromIndex; index <= words.length - targets.length; index += 1) {
     if (targets.every((target, offset) => normalizeTimestampToken(words[index + offset]?.text) === target)) return index + targets.length - 1;
+  }
+  // Cartesia occasionally emits two adjacent spoken words as one timestamp
+  // token. Preserve the same exact phrase anchor by comparing normalized
+  // contiguous text as well; this is not a duration estimate or a fallback
+  // caption. It still resolves to the actual start/end word timestamp.
+  for (let index = fromIndex; index < words.length; index += 1) {
+    let compact = '';
+    for (let end = index; end < words.length && end < index + targets.length + 2; end += 1) {
+      compact += normalizeTimestampToken(words[end]?.text);
+      if (compact === compactTarget) return end;
+      if (!compactTarget.startsWith(compact)) break;
+    }
   }
   return -1;
 }

@@ -51,6 +51,12 @@ function parseSseResult(body) {
 
 export async function synthesizeWalidWithTimestamps({ config, text }) {
   if (!config.cartesiaVoiceId || !text?.trim()) throw new Error('Cartesia Walid configuration or speech text is missing');
+  // Wi-Fi is a fixed Useful Tech pronunciation requirement. Do not allow the
+  // renderer to silently fall back to a letter-by-letter or Arabic-normalized
+  // reading when this term is present in a production narration.
+  if (/\bWi-Fi\b/.test(text) && !config.cartesiaPronunciationDictId) {
+    throw new Error('CARTESIA_WIFI_PRONUNCIATION_DICTIONARY_REQUIRED');
+  }
   const apiKey = keychainSecret(config.cartesiaKeychainService, config.cartesiaKeychainAccount);
   const response = await fetch('https://api.cartesia.ai/tts/sse', {
     method: 'POST',
@@ -63,6 +69,7 @@ export async function synthesizeWalidWithTimestamps({ config, text }) {
       output_format: { container: 'raw', encoding: 'pcm_s16le', sample_rate: WALID_PRODUCTION_PROFILE.sampleRate },
       language: WALID_PRODUCTION_PROFILE.language,
       accent: WALID_PRODUCTION_PROFILE.accent,
+      ...(config.cartesiaPronunciationDictId ? { pronunciation_dict_id: config.cartesiaPronunciationDictId } : {}),
       normalization: 'auto', add_timestamps: true, use_normalized_timestamps: true, context_id: randomUUID(),
       generation_config: { volume: 1, speed: WALID_PRODUCTION_PROFILE.speed },
     }),

@@ -33,6 +33,10 @@ export function loadConfig(env = process.env) {
     cartesiaKeychainService: all.CARTESIA_KEYCHAIN_SERVICE || '',
     cartesiaKeychainAccount: all.CARTESIA_KEYCHAIN_ACCOUNT || '',
     cartesiaVoiceId: all.CARTESIA_VOICE_ID || '',
+    // The id, not the key, of Useful Tech's private Cartesia pronunciation
+    // dictionary. Keeping it in the protected local config makes this
+    // production quality control durable across service restarts.
+    cartesiaPronunciationDictId: all.CARTESIA_PRONUNCIATION_DICT_ID || '',
     geminiKeychainService: all.GEMINI_KEYCHAIN_SERVICE || '',
     geminiKeychainAccount: all.GEMINI_KEYCHAIN_ACCOUNT || '',
     geminiModel: all.GEMINI_SEMANTIC_MODEL || 'gemini-3.5-flash-lite',
